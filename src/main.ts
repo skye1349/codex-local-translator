@@ -43,6 +43,7 @@ interface CodexTranslatorSettings {
   speechLanguage: string;
   speechRate: number;
   timeoutSeconds: number;
+  vocabularyCache: Record<string, VocabularyCacheEntry>;
 }
 
 const DEFAULT_SETTINGS: CodexTranslatorSettings = {
@@ -64,7 +65,8 @@ const DEFAULT_SETTINGS: CodexTranslatorSettings = {
   requireCommandForAutoTranslate: true,
   speechLanguage: "en-US",
   speechRate: 0.92,
-  timeoutSeconds: 90
+  timeoutSeconds: 90,
+  vocabularyCache: {}
 };
 
 const CODEX_CANDIDATES = [
@@ -133,6 +135,26 @@ interface ClaudeJsonResult {
 interface TokenUsage {
   input: number;
   output: number;
+}
+
+interface VocabularyCacheEntry {
+  baseDefinition?: string;
+  contextExplanation?: string;
+  updatedAt: number;
+  word: string;
+}
+
+interface VocabularyContext {
+  filePath?: string;
+  paragraph: string;
+}
+
+interface VocabularyCard {
+  baseDefinition?: string;
+  contextExplanation?: string;
+  errorText?: string;
+  status: "idle" | "loading" | "done" | "error";
+  word: string;
 }
 
 export default class CodexLocalTranslatorPlugin extends Plugin {
@@ -277,6 +299,7 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
 
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings.vocabularyCache = { ...(this.settings.vocabularyCache ?? {}) };
   }
 
   async saveSettings() {
@@ -335,11 +358,19 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
   }
 
   private async translateSelectionToPopup(sourceText: string, rect: DOMRect) {
-    const cached = this.translationCache.get(sourceText);
     const requestId = ++this.requestSerial;
+    const vocabularyWord = getSingleEnglishWord(sourceText);
+
+    if (vocabularyWord) {
+      await this.showVocabularyLookup(sourceText, vocabularyWord, rect, requestId);
+      return;
+    }
+
+    const cached = this.translationCache.get(sourceText);
 
     if (cached) {
       this.showPopup(cached, sourceText, rect, "done");
+      this.addPopupRefineButton(sourceText, rect, requestId);
       return;
     }
 
@@ -358,6 +389,101 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
       // Google Translate unavailable — fall back to AI directly
       if (requestId !== this.requestSerial) return;
       void this.translateSelectionToPopupWithAI(sourceText, rect, requestId);
+    }
+  }
+
+  private async showVocabularyLookup(sourceText: string, word: string, rect: DOMRect, requestId: number) {
+    const context = await this.getVocabularyContext(sourceText);
+    if (requestId !== this.requestSerial) return;
+
+    const cacheKey = buildVocabularyCacheKey(word, context.paragraph, this.settings.customPrompt);
+    const cached = this.settings.vocabularyCache[cacheKey];
+    const cachedBase = cached?.baseDefinition ?? this.findCachedVocabularyBase(word);
+    let baseDefinition = cachedBase ?? getLocalVocabularyDefinition(word);
+
+    if (cached?.contextExplanation) {
+      this.showVocabularyPopup({
+        word,
+        baseDefinition,
+        contextExplanation: cached.contextExplanation,
+        status: "done"
+      }, sourceText, context, rect, requestId, cacheKey);
+      return;
+    }
+
+    this.showVocabularyPopup({
+      word,
+      baseDefinition,
+      status: "loading"
+    }, sourceText, context, rect, requestId, cacheKey);
+
+    if (!baseDefinition) {
+      try {
+        const quickDefinition = await googleTranslate(word);
+        if (requestId !== this.requestSerial) return;
+        if (quickDefinition && quickDefinition.toLowerCase() !== word.toLowerCase()) {
+          baseDefinition = quickDefinition;
+          this.rememberVocabulary(cacheKey, {
+            word,
+            baseDefinition,
+            updatedAt: Date.now()
+          });
+          this.showVocabularyPopup({
+            word,
+            baseDefinition,
+            status: "loading"
+          }, sourceText, context, rect, requestId, cacheKey);
+        }
+      } catch {
+        if (requestId !== this.requestSerial) return;
+      }
+    }
+
+    void this.enhanceVocabularyWithAI(sourceText, word, context, rect, requestId, cacheKey, baseDefinition);
+  }
+
+  private async enhanceVocabularyWithAI(
+    sourceText: string,
+    word: string,
+    context: VocabularyContext,
+    rect: DOMRect,
+    requestId: number,
+    cacheKey: string,
+    baseDefinition?: string
+  ) {
+    const backendLabel = this.getBackendLabel();
+    this.updateVocabularyStatus(`${backendLabel} 正在结合上下文解释…`);
+    this.startOperation();
+
+    try {
+      const explanation = (await this.runAIPrompt(
+        buildVocabularyPrompt(word, sourceText, context, this.settings.customPrompt)
+      )).trim();
+
+      if (requestId !== this.requestSerial) return;
+      if (!explanation) throw new Error(`${backendLabel} returned an empty explanation.`);
+
+      this.rememberVocabulary(cacheKey, {
+        word,
+        baseDefinition,
+        contextExplanation: explanation,
+        updatedAt: Date.now()
+      });
+      this.showVocabularyPopup({
+        word,
+        baseDefinition,
+        contextExplanation: explanation,
+        status: "done"
+      }, sourceText, context, rect, requestId, cacheKey);
+    } catch (error) {
+      if (requestId !== this.requestSerial) return;
+      this.showVocabularyPopup({
+        word,
+        baseDefinition,
+        errorText: `AI explanation failed: ${getErrorMessage(error)}`,
+        status: "error"
+      }, sourceText, context, rect, requestId, cacheKey);
+      console.error("Vocabulary explanation failed", error);
     }
   }
 
@@ -384,6 +510,7 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
       if (!translation) throw new Error(`${backendLabel} returned an empty translation.`);
       this.rememberTranslation(sourceText, translation);
       this.showPopup(translation, sourceText, rect, "done");
+      this.addPopupRefineButton(sourceText, rect, requestId);
     } catch (error) {
       window.clearInterval(timerInterval);
       if (requestId !== this.requestSerial) return;
@@ -398,15 +525,7 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     const actions = popup.querySelector<HTMLElement>(".codex-local-translator-actions");
     if (!actions) return;
 
-    const refineBtn = document.createElement("button");
-    refineBtn.type = "button";
-    refineBtn.className = "codex-local-translator-refine-btn";
-    const label = this.getEffectiveBackend() === "claude" ? "✦ Claude" : "✦ Codex";
-    refineBtn.setText(label);
-    refineBtn.title = "Refine translation with AI";
-    refineBtn.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); });
-    refineBtn.addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation();
+    const refineBtn = this.createIconButton("sparkles", `Refine translation with ${this.getBackendLabel()}`, () => {
       refineBtn.remove();
       void this.translateSelectionToPopupWithAI(sourceText, rect, requestId);
     });
@@ -1040,6 +1159,48 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     await leaf.openFile(file, { active: false });
   }
 
+  private async getVocabularyContext(sourceText: string): Promise<VocabularyContext> {
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const file = activeView?.file;
+
+    if (!activeView || !file) {
+      return { paragraph: "" };
+    }
+
+    const content = activeView.getViewData();
+    const range = findSelectionRange(content, sourceText);
+    const paragraph = range
+      ? extractParagraphAround(content, range.start, range.end)
+      : "";
+
+    return {
+      filePath: file.path,
+      paragraph
+    };
+  }
+
+  private findCachedVocabularyBase(word: string): string | undefined {
+    const normalizedWord = normalizeVocabularyWord(word);
+
+    return Object.values(this.settings.vocabularyCache)
+      .find((entry) => normalizeVocabularyWord(entry.word) === normalizedWord && entry.baseDefinition)
+      ?.baseDefinition;
+  }
+
+  private async rememberVocabulary(cacheKey: string, entry: VocabularyCacheEntry) {
+    this.settings.vocabularyCache[cacheKey] = entry;
+
+    const entries = Object.entries(this.settings.vocabularyCache);
+    if (entries.length > 300) {
+      entries
+        .sort((left, right) => left[1].updatedAt - right[1].updatedAt)
+        .slice(0, entries.length - 300)
+        .forEach(([key]) => delete this.settings.vocabularyCache[key]);
+    }
+
+    await this.saveSettings();
+  }
+
   private rememberTranslation(sourceText: string, translation: string) {
     this.translationCache.set(sourceText, translation);
 
@@ -1118,6 +1279,89 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     if (!popup) return;
     const body = popup.querySelector<HTMLElement>(".codex-translator-stream-body");
     if (body) body.setText(text);
+  }
+
+  private updateVocabularyStatus(text: string) {
+    const popup = this.popupEl;
+    if (!popup) return;
+    const status = popup.querySelector<HTMLElement>(".codex-local-translator-vocab-status");
+    if (status) status.setText(text);
+  }
+
+  private showVocabularyPopup(
+    card: VocabularyCard,
+    sourceText: string,
+    context: VocabularyContext,
+    rect: DOMRect,
+    requestId: number,
+    cacheKey: string
+  ) {
+    const popup = this.ensurePopup();
+    popup.empty();
+    popup.classList.toggle("is-loading", card.status === "loading");
+    popup.classList.toggle("is-error", card.status === "error");
+
+    const body = document.createElement("div");
+    body.className = "codex-local-translator-vocab";
+
+    const wordEl = body.createDiv("codex-local-translator-vocab-word");
+    wordEl.setText(card.word);
+
+    const localEl = body.createDiv("codex-local-translator-vocab-section");
+    localEl.createDiv("codex-local-translator-vocab-label").setText("基础释义");
+    localEl.createDiv("codex-local-translator-vocab-text").setText(
+      card.baseDefinition || "本地词典和缓存暂无命中。"
+    );
+
+    const contextEl = body.createDiv("codex-local-translator-vocab-section");
+    contextEl.createDiv("codex-local-translator-vocab-label").setText("当前语境");
+    contextEl.createDiv("codex-local-translator-vocab-text").setText(
+      card.contextExplanation ||
+      (card.status === "loading"
+        ? `${this.getBackendLabel()} 正在结合当前段落解释…`
+        : card.errorText || "点击 AI 按钮生成这个词在当前段落里的意思。")
+    );
+
+    if (card.status === "loading") {
+      const status = body.createDiv("codex-local-translator-vocab-status");
+      status.setText(`${this.getBackendLabel()} 正在结合上下文解释…`);
+    }
+
+    popup.appendChild(body);
+
+    const actions = document.createElement("div");
+    actions.className = "codex-local-translator-actions";
+
+    actions.appendChild(this.createIconButton("volume-2", "Read selected word", () => {
+      void this.speakText(sourceText);
+    }));
+
+    const aiButton = this.createIconButton("sparkles", `Explain in context with ${this.getBackendLabel()}`, () => {
+      void this.enhanceVocabularyWithAI(
+        sourceText,
+        card.word,
+        context,
+        rect,
+        requestId,
+        cacheKey,
+        card.baseDefinition
+      );
+    });
+    aiButton.disabled = card.status === "loading";
+    actions.appendChild(aiButton);
+
+    actions.appendChild(this.createIconButton("book-plus", "Save word to excerpts", () => {
+      void this.saveExcerpt(sourceText, formatVocabularyCard(card, context));
+    }));
+
+    actions.appendChild(this.createIconButton("copy", "Copy vocabulary note", () => {
+      void navigator.clipboard.writeText(formatVocabularyCard(card, context));
+      new Notice("Vocabulary note copied.");
+    }));
+
+    popup.appendChild(actions);
+    popup.style.display = "block";
+    this.positionPopup(rect);
   }
 
   private showPopup(text: string, sourceText: string, rect: DOMRect, state: "loading" | "done" | "error") {
@@ -1677,6 +1921,227 @@ function buildTranslationPrompt(sourceText: string, customPrompt: string): strin
     JSON.stringify({ text: sourceText })
   ].join("\n");
 }
+
+function buildVocabularyPrompt(
+  word: string,
+  selectedText: string,
+  context: VocabularyContext,
+  customPrompt: string
+): string {
+  return [
+    "You are a concise bilingual vocabulary coach for a Chinese reader.",
+    "Explain the selected English word in Simplified Chinese based on the current reading context.",
+    customPrompt.trim()
+      ? `User custom context and preferences:\n${customPrompt.trim()}`
+      : "User custom context and preferences: none.",
+    "",
+    "Rules:",
+    "- Return only the explanation in Simplified Chinese.",
+    "- Keep it concise: 3 to 5 short bullet points.",
+    "- Explain the word's meaning in this exact context, not only a generic dictionary meaning.",
+    "- Include a natural Chinese rendering of the local phrase if helpful.",
+    "- Mention common word family or confusion points only when useful.",
+    "",
+    "JSON payload:",
+    JSON.stringify({
+      word,
+      selectedText,
+      notePath: context.filePath ?? "",
+      paragraph: context.paragraph
+    })
+  ].join("\n");
+}
+
+function getSingleEnglishWord(text: string): string | null {
+  const cleaned = text
+    .trim()
+    .replace(/^[“"'\(\[\{]+|[”"'\)\]\}.,;:!?]+$/g, "");
+
+  if (!/^[A-Za-z][A-Za-z'-]{1,39}$/.test(cleaned)) {
+    return null;
+  }
+
+  return cleaned;
+}
+
+function normalizeVocabularyWord(word: string): string {
+  return word.toLowerCase().replace(/^'+|'+$/g, "");
+}
+
+function buildVocabularyCacheKey(word: string, paragraph: string, customPrompt: string): string {
+  const normalizedWord = normalizeVocabularyWord(word);
+  const contextHash = hashString(normalizeWhitespace(paragraph).slice(0, 1600));
+  const promptHash = hashString(customPrompt.trim());
+  return `${normalizedWord}:${contextHash}:${promptHash}`;
+}
+
+function extractParagraphAround(content: string, start: number, end: number): string {
+  const before = content.slice(0, start);
+  const after = content.slice(end);
+  const paragraphStartMatch = before.match(/\n\s*\n(?![\s\S]*\n\s*\n)/);
+  const paragraphStart = paragraphStartMatch ? before.lastIndexOf(paragraphStartMatch[0]) + paragraphStartMatch[0].length : 0;
+  const afterBreak = after.search(/\n\s*\n/);
+  const paragraphEnd = afterBreak >= 0 ? end + afterBreak : content.length;
+
+  return content
+    .slice(paragraphStart, paragraphEnd)
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 1800);
+}
+
+function getLocalVocabularyDefinition(word: string): string | undefined {
+  const normalizedWord = normalizeVocabularyWord(word);
+  const candidates = getVocabularyLookupCandidates(normalizedWord);
+
+  for (const candidate of candidates) {
+    const definition = LOCAL_EN_ZH_DICTIONARY[candidate];
+    if (definition) return definition;
+  }
+
+  return undefined;
+}
+
+function getVocabularyLookupCandidates(word: string): string[] {
+  const candidates = new Set<string>([word]);
+
+  if (word.endsWith("'s")) candidates.add(word.slice(0, -2));
+  if (word.endsWith("ies") && word.length > 4) candidates.add(`${word.slice(0, -3)}y`);
+  if (word.endsWith("es") && word.length > 3) candidates.add(word.slice(0, -2));
+  if (word.endsWith("s") && word.length > 3) candidates.add(word.slice(0, -1));
+  if (word.endsWith("ing") && word.length > 5) {
+    candidates.add(word.slice(0, -3));
+    candidates.add(`${word.slice(0, -3)}e`);
+  }
+  if (word.endsWith("ed") && word.length > 4) {
+    candidates.add(word.slice(0, -2));
+    candidates.add(`${word.slice(0, -1)}`);
+  }
+
+  return Array.from(candidates);
+}
+
+function formatVocabularyCard(card: VocabularyCard, context: VocabularyContext): string {
+  const lines = [
+    `**${card.word}**`,
+    "",
+    `- 基础释义：${card.baseDefinition || "本地词典和缓存暂无命中。"}`
+  ];
+
+  if (card.contextExplanation) {
+    lines.push("", "### 当前语境解释", card.contextExplanation);
+  } else if (card.errorText) {
+    lines.push("", `### 当前语境解释`, card.errorText);
+  }
+
+  if (context.filePath) {
+    lines.push("", `Source: [[${context.filePath}]]`);
+  }
+
+  if (context.paragraph) {
+    lines.push("", "### Context", blockquote(context.paragraph));
+  }
+
+  return lines.join("\n");
+}
+
+function hashString(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+const LOCAL_EN_ZH_DICTIONARY: Record<string, string> = {
+  ability: "能力；才能",
+  abstract: "抽象的；摘要",
+  accept: "接受；认可",
+  achieve: "实现；达成",
+  action: "行动；行为",
+  adapt: "适应；调整",
+  advantage: "优势；有利条件",
+  affect: "影响；情感",
+  analysis: "分析",
+  appear: "出现；显得",
+  appropriate: "合适的；恰当的",
+  assume: "假设；承担",
+  attention: "注意力；关注",
+  attitude: "态度",
+  behavior: "行为",
+  belief: "信念；看法",
+  benefit: "好处；受益",
+  bias: "偏见；倾向",
+  capability: "能力；性能",
+  chapter: "章节",
+  characteristic: "特征；特点",
+  circumstance: "情形；环境",
+  combine: "结合；合并",
+  common: "常见的；共同的",
+  concept: "概念",
+  conclusion: "结论",
+  condition: "条件；状态",
+  confidence: "信心；确信",
+  consider: "考虑；认为",
+  considerable: "相当大的；值得注意的",
+  consistent: "一致的；稳定的",
+  context: "语境；背景",
+  decision: "决定；决策",
+  define: "定义；界定",
+  discipline: "纪律；自律；学科",
+  edge: "优势；边缘",
+  emotion: "情绪",
+  environment: "环境",
+  evidence: "证据",
+  expectation: "预期；期待",
+  experience: "经验；经历",
+  extensive: "广泛的；大量的",
+  failure: "失败",
+  feedback: "反馈",
+  fundamental: "根本的；基础的",
+  habit: "习惯",
+  hypothesis: "假设",
+  impact: "影响；冲击",
+  imply: "暗示；意味着",
+  interpret: "解释；理解",
+  judgment: "判断",
+  judgement: "判断",
+  material: "材料；素材；重要的",
+  mental: "心理的；精神的",
+  misjudgement: "误判；判断错误",
+  misjudgment: "误判；判断错误",
+  opportunity: "机会",
+  paragraph: "段落",
+  perceive: "感知；理解",
+  perspective: "视角；观点",
+  phrase: "短语；表达",
+  principle: "原则；原理",
+  probability: "概率；可能性",
+  process: "过程；处理",
+  psychology: "心理学；心理",
+  reaction: "反应",
+  recognize: "识别；认识到",
+  reference: "引用；参考",
+  reinforce: "强化；加强",
+  responsibility: "责任",
+  revision: "修订；修改",
+  risk: "风险",
+  selection: "选择；选集；节选",
+  source: "来源；源头",
+  sponsorship: "赞助；主办",
+  strategy: "策略",
+  survey: "调查；概览",
+  tendency: "倾向",
+  theory: "理论",
+  trade: "交易；买卖",
+  trader: "交易者",
+  trading: "交易；交易活动",
+  uncertainty: "不确定性",
+  understand: "理解",
+  version: "版本；说法",
+  vocabulary: "词汇"
+};
 
 function parseScopeEntries(scopeText: string): string[] {
   const rawEntries = scopeText.includes("\n")

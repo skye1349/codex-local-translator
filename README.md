@@ -10,6 +10,7 @@ Translate selected text, whole notes, or batches of Markdown files in Obsidian t
 
 - Translate selected Markdown to Simplified Chinese.
 - Show a translation popup only when you hold `Command` while selecting text.
+- Look up a selected English word with instant local/cache definitions and optional AI context explanation.
 - Read selected English text aloud with the system text-to-speech voice.
 - Save selected passages to an excerpt note with source file and line references.
 - Translate the current Markdown file and append the Chinese version below the original.
@@ -39,6 +40,7 @@ Batch and full-file commands write directly to your Markdown files. Back up your
 ### Selection Popup
 
 Hold `Command` while selecting text to show a translation popup. The popup includes read-aloud, excerpt, and copy actions.
+For single English words, the popup shows a local/cache vocabulary note first and can enrich it with Codex or Claude Code using the current paragraph as context.
 
 ![Selection translation popup](docs/assets/selection-popup.svg)
 
