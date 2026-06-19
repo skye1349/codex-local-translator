@@ -1,6 +1,6 @@
 # Codex Local Translator for Obsidian
 
-Translate selected text, whole notes, or batches of Markdown files in Obsidian through the locally logged-in Codex CLI.
+Translate selected text, whole notes, or batches of Markdown files in Obsidian through a locally logged-in AI coding assistant CLI.
 
 > This is an unofficial community plugin. It is not affiliated with OpenAI or Obsidian.
 
@@ -15,19 +15,20 @@ Translate selected text, whole notes, or batches of Markdown files in Obsidian t
 - Translate the current Markdown file and append the Chinese version below the original.
 - Translate the current Markdown file into interleaved English/Chinese paragraphs.
 - Batch translate multiple Markdown files by file path, folder path, or wildcard.
+- Use Codex or Claude Code without API keys.
 - Use a custom prompt/context for book, domain, terminology, or style guidance.
 
 ## Requirements
 
 - Obsidian desktop. This plugin is desktop-only.
-- Codex installed locally, either through Codex.app or the Codex CLI.
-- A Codex login using your ChatGPT account.
+- Codex installed locally, either through Codex.app or the Codex CLI, or Claude Code installed locally.
+- A local login for the backend you use: Codex with your ChatGPT account, or Claude Code with your Claude account.
 
-This plugin does not use an OpenAI API key. It shells out to a local `codex` executable and uses your existing Codex login.
+This plugin does not use OpenAI or Anthropic API keys. It shells out to local `codex` or `claude` executables and uses your existing local login.
 
 ## Privacy And Data
 
-Selected text and Markdown file contents are sent to Codex for translation through the local Codex executable. This is not offline translation.
+Selected text and Markdown file contents are sent to the configured backend for translation through the local executable. This is not offline translation.
 
 The plugin stores only local plugin settings in your vault, such as model name, timeout, excerpt note path, and custom prompt. It does not store API keys.
 
@@ -87,6 +88,7 @@ Supported scope types:
 
 - `Auto translate selection`: show a popup after text is selected.
 - `Require Command key for auto translate`: only show the popup when `Command` is held during selection. Enabled by default.
+- `AI backend`: `Auto`, `Codex`, or `Claude Code`. Auto uses Claude Code when available, then falls back to Codex.
 - `Custom prompt / context`: add book, topic, terminology, style, or translation preferences.
 - `Excerpt file`: vault path for saved passages.
 - `Open excerpt file after saving`: open the excerpt note in a right-side split.
@@ -94,9 +96,13 @@ Supported scope types:
 - `Speech language`: defaults to `en-US`.
 - `Speech rate`: defaults to `0.92`.
 - `Codex command`: leave empty to auto-detect Codex.app or a local CLI.
+- `Claude command`: leave empty to auto-detect Claude Code.
 - `Model`: defaults to `gpt-5.4-mini`.
+- `Claude model`: defaults to `claude-sonnet-4-5`.
 - `Reasoning effort`: defaults to `none`.
-- `Timeout`: maximum seconds for each Codex invocation.
+- `Timeout`: maximum seconds for each AI invocation.
+- `Single-shot translation limit`: notes under this character count are translated in one request.
+- `Batch chunk size`: larger chunks reduce process startup overhead and repeated prompt tokens.
 
 Example custom prompt:
 

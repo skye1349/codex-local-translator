@@ -21,7 +21,7 @@ import {
 type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
 type InsertMode = "replace" | "append";
 type FullDocumentInsertMode = "append" | "interleave";
-type AIBackend = "codex" | "claude";
+type AIBackend = "auto" | "codex" | "claude";
 
 interface CodexTranslatorSettings {
   aiBackend: AIBackend;
@@ -46,9 +46,9 @@ interface CodexTranslatorSettings {
 }
 
 const DEFAULT_SETTINGS: CodexTranslatorSettings = {
-  aiBackend: "codex",
+  aiBackend: "auto",
   autoTranslate: true,
-  batchChunkChars: 4000,
+  batchChunkChars: 10000,
   claudeCommand: "",
   claudeModel: "claude-sonnet-4-5",
   codexCommand: "",
@@ -60,7 +60,7 @@ const DEFAULT_SETTINGS: CodexTranslatorSettings = {
   model: "gpt-5.4-mini",
   openExcerptAfterSave: true,
   reasoningEffort: "none",
-  singleShotMaxChars: 12000,
+  singleShotMaxChars: 30000,
   requireCommandForAutoTranslate: true,
   speechLanguage: "en-US",
   speechRate: 0.92,
@@ -362,7 +362,7 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
   }
 
   private async translateSelectionToPopupWithAI(sourceText: string, rect: DOMRect, requestId: number) {
-    const backendLabel = this.settings.aiBackend === "claude" ? "Claude Code" : "Codex";
+    const backendLabel = this.getBackendLabel();
     this.showPopupLoading(backendLabel, rect, () => {
       this.stopCurrentTranslation();
       this.hidePopup();
@@ -401,7 +401,7 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     const refineBtn = document.createElement("button");
     refineBtn.type = "button";
     refineBtn.className = "codex-local-translator-refine-btn";
-    const label = this.settings.aiBackend === "claude" ? "✦ Claude" : "✦ Codex";
+    const label = this.getEffectiveBackend() === "claude" ? "✦ Claude" : "✦ Codex";
     refineBtn.setText(label);
     refineBtn.title = "Refine translation with AI";
     refineBtn.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); });
@@ -422,7 +422,7 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
       return;
     }
 
-    const backendLabel = this.settings.aiBackend === "claude" ? "Claude Code" : "Codex";
+    const backendLabel = this.getBackendLabel();
     const overlay = new TranslationProgressOverlay(
       this.app.workspace.containerEl,
       backendLabel,
@@ -482,7 +482,7 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     }
 
     this.hidePopup();
-    const backendLabel = this.settings.aiBackend === "claude" ? "Claude Code" : "Codex";
+    const backendLabel = this.getBackendLabel();
     const overlay = new TranslationProgressOverlay(
       this.app.workspace.containerEl,
       backendLabel,
@@ -548,7 +548,7 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     }
 
     this.hidePopup();
-    const backendLabel = this.settings.aiBackend === "claude" ? "Claude Code" : "Codex";
+    const backendLabel = this.getBackendLabel();
     const overlay = new TranslationProgressOverlay(
       this.app.workspace.containerEl,
       backendLabel,
@@ -738,7 +738,7 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
   }
 
   private async runAIPrompt(prompt: string, onChunk?: (text: string) => void): Promise<string> {
-    if (this.settings.aiBackend === "claude") {
+    if (this.getEffectiveBackend() === "claude") {
       return await this.runClaudePrompt(prompt, onChunk);
     }
     return await this.runCodexPrompt(prompt);
@@ -793,6 +793,20 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
           "--skip-git-repo-check",
           "--color",
           "never",
+          "--disable",
+          "plugins",
+          "--disable",
+          "tool_suggest",
+          "--disable",
+          "multi_agent",
+          "--disable",
+          "browser_use",
+          "--disable",
+          "computer_use",
+          "--disable",
+          "image_generation",
+          "--disable",
+          "workspace_dependencies",
           "-C",
           tmpdir(),
           "-s",
@@ -848,7 +862,7 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     overlay: TranslationProgressOverlay,
     progressLabel: string
   ): Promise<{ blocks: MarkdownBlock[]; fullText: string; translations: string[] }> {
-    const backendLabel = this.settings.aiBackend === "claude" ? "Claude Code" : "Codex";
+    const backendLabel = this.getBackendLabel();
     const { body } = extractFrontmatter(sourceText);
     const blocks = splitMarkdownBlocks(body);
 
@@ -915,16 +929,33 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     try {
       return parseTranslationArray(rawResult, blockTexts.length);
     } catch (error) {
-      console.warn("Block translation was not valid JSON; retrying blocks individually.", error);
-      const translations: string[] = [];
+      console.warn("Block translation had the wrong delimiter count; retrying with smaller batches.", error);
 
-      for (const blockText of blockTexts) {
-        if (this.isCancelled) break;
-        translations.push((await this.runAITranslation(blockText)).trim());
+      if (blockTexts.length === 1) {
+        return [(await this.runAITranslation(blockTexts[0])).trim()];
       }
 
-      return translations;
+      const midpoint = Math.ceil(blockTexts.length / 2);
+      const left = await this.translateBlockBatch(blockTexts.slice(0, midpoint), onChunk);
+      const right = await this.translateBlockBatch(blockTexts.slice(midpoint), onChunk);
+      return [...left, ...right];
     }
+  }
+
+  private getEffectiveBackend(): Exclude<AIBackend, "auto"> {
+    if (this.settings.aiBackend === "claude") {
+      return "claude";
+    }
+
+    if (this.settings.aiBackend === "codex") {
+      return "codex";
+    }
+
+    return hasClaudeCommand(this.settings.claudeCommand) ? "claude" : "codex";
+  }
+
+  private getBackendLabel(): string {
+    return this.getEffectiveBackend() === "claude" ? "Claude Code" : "Codex";
   }
 
   private async ensureExcerptFile(): Promise<TFile> {
@@ -1343,9 +1374,10 @@ class CodexTranslatorSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("AI backend")
-      .setDesc("Codex uses your ChatGPT plan. Claude Code uses your Claude plan. Both run locally with no API key.")
+      .setDesc("Auto uses Claude Code when available, then falls back to Codex. Both run locally with no API key.")
       .addDropdown((dropdown) =>
         dropdown
+          .addOption("auto", "Auto (Claude if available)")
           .addOption("codex", "Codex (ChatGPT plan)")
           .addOption("claude", "Claude Code (Claude plan)")
           .setValue(this.plugin.settings.aiBackend)
@@ -1356,10 +1388,10 @@ class CodexTranslatorSettingTab extends PluginSettingTab {
           })
       );
 
-    if (this.plugin.settings.aiBackend === "claude") {
+    if (this.plugin.settings.aiBackend !== "codex") {
       new Setting(containerEl)
         .setName("Claude command")
-        .setDesc("Leave empty to auto-detect the Claude Code CLI.")
+        .setDesc("Used by Claude or Auto mode. Leave empty to auto-detect the Claude Code CLI.")
         .addText((text) =>
           text
             .setPlaceholder("/opt/homebrew/bin/claude")
@@ -1372,7 +1404,7 @@ class CodexTranslatorSettingTab extends PluginSettingTab {
 
       new Setting(containerEl)
         .setName("Claude model")
-        .setDesc("Claude model to use. Must be available on your Claude plan.")
+        .setDesc("Used by Claude or Auto mode when Claude Code is available.")
         .addText((text) =>
           text
             .setPlaceholder("claude-sonnet-4-5")
@@ -1408,10 +1440,10 @@ class CodexTranslatorSettingTab extends PluginSettingTab {
           })
       );
 
-    if (this.plugin.settings.aiBackend === "codex") {
+    if (this.plugin.settings.aiBackend !== "claude") {
       new Setting(containerEl)
         .setName("Codex command")
-        .setDesc("Leave empty to auto-detect Codex.app or the local Codex CLI.")
+        .setDesc("Used by Codex or Auto fallback. Leave empty to auto-detect Codex.app or the local Codex CLI.")
         .addText((text) =>
           text
             .setPlaceholder("/Applications/Codex.app/Contents/Resources/codex")
@@ -1424,7 +1456,7 @@ class CodexTranslatorSettingTab extends PluginSettingTab {
 
       new Setting(containerEl)
         .setName("Codex model")
-        .setDesc("For ChatGPT login, gpt-5.4-mini is a good default.")
+        .setDesc("Used by Codex or Auto fallback. For ChatGPT login, gpt-5.4-mini is a good default.")
         .addText((text) =>
           text
             .setPlaceholder("gpt-5.4-mini")
@@ -1550,10 +1582,10 @@ class CodexTranslatorSettingTab extends PluginSettingTab {
           })
       );
 
-    if (this.plugin.settings.aiBackend === "codex") {
+    if (this.plugin.settings.aiBackend !== "claude") {
       new Setting(containerEl)
         .setName("Reasoning effort")
-        .setDesc("Use none for translation unless you need heavier reasoning.")
+        .setDesc("Used by Codex or Auto fallback. Use none for translation unless you need heavier reasoning.")
         .addDropdown((dropdown) =>
           dropdown
             .addOption("none", "none")
@@ -1590,7 +1622,7 @@ class CodexTranslatorSettingTab extends PluginSettingTab {
       .setDesc("Documents under this length are sent to the AI in one request for better quality. Longer documents fall back to batch mode.")
       .addText((text) =>
         text
-          .setPlaceholder("12000")
+          .setPlaceholder("30000")
           .setValue(String(this.plugin.settings.singleShotMaxChars))
           .onChange(async (value) => {
             const parsed = Number.parseInt(value, 10);
@@ -1606,7 +1638,7 @@ class CodexTranslatorSettingTab extends PluginSettingTab {
       .setDesc("When falling back to batch mode, how many characters per chunk.")
       .addText((text) =>
         text
-          .setPlaceholder("4000")
+          .setPlaceholder("10000")
           .setValue(String(this.plugin.settings.batchChunkChars))
           .onChange(async (value) => {
             const parsed = Number.parseInt(value, 10);
@@ -1893,6 +1925,14 @@ function resolveClaudeCommand(configuredCommand: string): string {
   }
 
   return CLAUDE_CANDIDATES.find((candidate) => candidate === "claude" || existsSync(candidate)) ?? "claude";
+}
+
+function hasClaudeCommand(configuredCommand: string): boolean {
+  if (configuredCommand) {
+    return existsSync(configuredCommand) || configuredCommand === "claude";
+  }
+
+  return CLAUDE_CANDIDATES.some((candidate) => candidate !== "claude" && existsSync(candidate));
 }
 
 interface ProcessResult {
