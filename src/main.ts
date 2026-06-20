@@ -67,6 +67,7 @@ interface ContextualAIReaderSettings {
   speechRate: number;
   timeoutSeconds: number;
   vocabularyCache: Record<string, VocabularyCacheEntry>;
+  youtubeScreenshotFolder: string;
   youtubeTranscriptFolder: string;
 }
 
@@ -91,6 +92,7 @@ const DEFAULT_SETTINGS: ContextualAIReaderSettings = {
   speechRate: 0.92,
   timeoutSeconds: 90,
   vocabularyCache: {},
+  youtubeScreenshotFolder: "YouTube Screenshots",
   youtubeTranscriptFolder: "YouTube Transcripts"
 };
 
@@ -209,6 +211,12 @@ interface YouTubeInputResult {
   url: string;
 }
 
+interface YouTubeScreenshot {
+  png: Buffer;
+  start: number;
+  videoId: string;
+}
+
 export default class ContextualAIReaderPlugin extends Plugin {
   settings: ContextualAIReaderSettings = DEFAULT_SETTINGS;
   private autoTimer?: number;
@@ -229,7 +237,7 @@ export default class ContextualAIReaderPlugin extends Plugin {
 
     this.registerView(
       YOUTUBE_PLAYER_VIEW_TYPE,
-      (leaf) => new YouTubePlayerView(leaf)
+      (leaf) => new YouTubePlayerView(leaf, this)
     );
 
     this.statusBarEl = this.addStatusBarItem();
@@ -304,6 +312,14 @@ export default class ContextualAIReaderPlugin extends Plugin {
       name: "Open YouTube video in Obsidian tab",
       callback: () => {
         void this.openYouTubeVideoFromCurrentNote();
+      }
+    });
+
+    this.addCommand({
+      id: "capture-youtube-screenshot-to-note",
+      name: "Capture YouTube screenshot to current note",
+      callback: () => {
+        void this.captureYouTubeScreenshotToNote();
       }
     });
 
@@ -1350,6 +1366,68 @@ export default class ContextualAIReaderPlugin extends Plugin {
     }
   }
 
+  async captureYouTubeScreenshotToNote() {
+    const playerView = this.getYouTubePlayerView();
+    if (!playerView?.hasVideo()) {
+      new Notice("Open a YouTube video in the plugin player first.");
+      return;
+    }
+
+    const targetView = this.getTargetMarkdownView();
+    if (!targetView?.file) {
+      new Notice("Open a Markdown note where the screenshot should be inserted.");
+      return;
+    }
+
+    try {
+      const shot = await playerView.captureFramePng();
+      const folder = normalizePath(this.settings.youtubeScreenshotFolder.trim() || DEFAULT_SETTINGS.youtubeScreenshotFolder);
+      const timestamp = formatTimestamp(shot.start).replace(/:/g, "-");
+      const fileName = `${sanitizeFileName(`YouTube ${shot.videoId} ${timestamp}`)}.png`;
+      const path = await this.getAvailableVaultPath(`${folder}/${fileName}`);
+      await this.ensureParentFolders(path);
+      const screenshotFile = await this.app.vault.createBinary(path, bufferToArrayBuffer(shot.png));
+      const embed = this.createScreenshotEmbed(screenshotFile, targetView.file, shot);
+      targetView.editor.replaceSelection(embed);
+      new Notice(`YouTube screenshot inserted: ${formatTimestamp(shot.start)}`);
+    } catch (error) {
+      new Notice(`Could not capture YouTube screenshot: ${getErrorMessage(error)}`, 9000);
+      console.error("Could not capture YouTube screenshot", error);
+    }
+  }
+
+  private getYouTubePlayerView(): YouTubePlayerView | null {
+    for (const leaf of this.app.workspace.getLeavesOfType(YOUTUBE_PLAYER_VIEW_TYPE)) {
+      if (leaf.view instanceof YouTubePlayerView) {
+        return leaf.view;
+      }
+    }
+    return null;
+  }
+
+  private getTargetMarkdownView(): MarkdownView | null {
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (activeView) {
+      return activeView;
+    }
+
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      if (leaf.view instanceof MarkdownView) {
+        return leaf.view;
+      }
+    }
+
+    return null;
+  }
+
+  private createScreenshotEmbed(file: TFile, targetFile: TFile, shot: YouTubeScreenshot): string {
+    const timestamp = formatTimestamp(shot.start);
+    const imageLink = this.app.fileManager.generateMarkdownLink(file, targetFile.path, "", `${shot.videoId} - ${timestamp}`);
+    const imageEmbed = imageLink.startsWith("!") ? imageLink : `!${imageLink}`;
+    const timestampLink = `[${timestamp}](${buildYouTubeInternalSeekLink(shot.videoId, shot.start)})`;
+    return `\n${imageEmbed}\n${timestampLink}\n`;
+  }
+
   private async extractYouTubeSubtitlesFromCurrentNote() {
     const input = await this.promptForYouTubeUrl("Extract YouTube subtitles", true);
     if (!input?.url) return;
@@ -1843,11 +1921,14 @@ class TranslationProgressOverlay {
 
 class YouTubePlayerView extends ItemView {
   private iframe?: HTMLIFrameElement;
+  private currentTimeTimer?: number;
+  private messageHandler?: (event: MessageEvent) => void;
   private titleEl?: HTMLElement;
+  private currentTime = 0;
   private videoId = "";
   private start = 0;
 
-  constructor(leaf: WorkspaceLeaf) {
+  constructor(leaf: WorkspaceLeaf, private readonly plugin: ContextualAIReaderPlugin) {
     super(leaf);
   }
 
@@ -1866,8 +1947,22 @@ class YouTubePlayerView extends ItemView {
   async onOpen() {
     this.containerEl.empty();
     const root = this.containerEl.createDiv("contextual-ai-reader-youtube-player-view");
-    this.titleEl = root.createDiv("contextual-ai-reader-youtube-player-title");
+    const header = root.createDiv("contextual-ai-reader-youtube-player-header");
+    this.titleEl = header.createDiv("contextual-ai-reader-youtube-player-title");
     this.titleEl.setText("YouTube Player");
+    const screenshotButton = header.createEl("button", {
+      cls: "contextual-ai-reader-youtube-player-button",
+      attr: {
+        "aria-label": "Capture screenshot to current note",
+        title: "Capture screenshot to current note"
+      }
+    });
+    setIcon(screenshotButton, "camera");
+    screenshotButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void this.plugin.captureYouTubeScreenshotToNote();
+    });
 
     this.iframe = root.createEl("iframe", {
       cls: "contextual-ai-reader-youtube-player-frame"
@@ -1880,16 +1975,43 @@ class YouTubePlayerView extends ItemView {
     }
   }
 
+  async onClose() {
+    this.stopCurrentTimePolling();
+    this.unregisterMessageHandler();
+  }
+
+  hasVideo(): boolean {
+    return Boolean(this.videoId && this.iframe);
+  }
+
+  async captureFramePng(): Promise<YouTubeScreenshot> {
+    if (!this.videoId || !this.iframe) {
+      throw new Error("No YouTube video is open.");
+    }
+
+    const rect = this.iframe.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      throw new Error("YouTube player is not visible.");
+    }
+
+    return {
+      png: await capturePagePng(rect),
+      start: this.getCurrentTimestamp(),
+      videoId: this.videoId
+    };
+  }
+
   setVideo(videoId: string, start: number) {
     const normalizedStart = Math.max(0, Math.floor(start));
     this.videoId = videoId;
     this.start = normalizedStart;
+    this.currentTime = normalizedStart;
     this.refreshIframe();
   }
 
   private updateTitle() {
     if (this.titleEl) {
-      this.titleEl.setText(`YouTube · ${this.videoId} · ${formatTimestamp(this.start)}`);
+      this.titleEl.setText(`YouTube · ${this.videoId} · ${formatTimestamp(this.getCurrentTimestamp())}`);
     }
   }
 
@@ -1901,9 +2023,12 @@ class YouTubePlayerView extends ItemView {
     const nextSrc = this.buildEmbedUrl();
 
     this.iframe.src = "about:blank";
+    this.stopCurrentTimePolling();
     window.setTimeout(() => {
       if (this.iframe) {
         this.iframe.src = nextSrc;
+        this.registerMessageHandler();
+        this.startCurrentTimePolling();
       }
     }, 0);
   }
@@ -1917,6 +2042,55 @@ class YouTubePlayerView extends ItemView {
       start: String(this.start)
     });
     return `https://www.youtube.com/embed/${encodeURIComponent(this.videoId)}?${params.toString()}`;
+  }
+
+  private getCurrentTimestamp(): number {
+    return Math.max(0, Math.floor(this.currentTime || this.start));
+  }
+
+  private registerMessageHandler() {
+    this.unregisterMessageHandler();
+    this.messageHandler = (event: MessageEvent) => {
+      if (event.source !== this.iframe?.contentWindow) return;
+      const data = parseYouTubePlayerMessage(event.data);
+      const currentTime = data?.info?.currentTime;
+      if (typeof currentTime === "number" && Number.isFinite(currentTime)) {
+        this.currentTime = currentTime;
+        this.updateTitle();
+      }
+    };
+    window.addEventListener("message", this.messageHandler);
+  }
+
+  private unregisterMessageHandler() {
+    if (this.messageHandler) {
+      window.removeEventListener("message", this.messageHandler);
+      this.messageHandler = undefined;
+    }
+  }
+
+  private startCurrentTimePolling() {
+    this.stopCurrentTimePolling();
+    window.setTimeout(() => this.sendYouTubeCommand("listening", undefined), 300);
+    this.currentTimeTimer = window.setInterval(() => {
+      this.sendYouTubeCommand("getCurrentTime", []);
+    }, 1500);
+  }
+
+  private stopCurrentTimePolling() {
+    if (this.currentTimeTimer) {
+      window.clearInterval(this.currentTimeTimer);
+      this.currentTimeTimer = undefined;
+    }
+  }
+
+  private sendYouTubeCommand(func: string, args: unknown[] | undefined) {
+    const win = this.iframe?.contentWindow;
+    if (!win) return;
+    const payload = args === undefined
+      ? { event: func, id: YOUTUBE_PLAYER_VIEW_TYPE }
+      : { event: "command", func, args };
+    win.postMessage(JSON.stringify(payload), "https://www.youtube.com");
   }
 }
 
@@ -2215,6 +2389,19 @@ class ContextualAIReaderSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.youtubeTranscriptFolder)
           .onChange(async (value) => {
             this.plugin.settings.youtubeTranscriptFolder = value.trim() || DEFAULT_SETTINGS.youtubeTranscriptFolder;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("YouTube screenshot folder")
+      .setDesc("Vault folder where captured YouTube screenshots are saved.")
+      .addText((text) =>
+        text
+          .setPlaceholder("YouTube Screenshots")
+          .setValue(this.plugin.settings.youtubeScreenshotFolder)
+          .onChange(async (value) => {
+            this.plugin.settings.youtubeScreenshotFolder = value.trim() || DEFAULT_SETTINGS.youtubeScreenshotFolder;
             await this.plugin.saveSettings();
           })
       );
@@ -3662,6 +3849,65 @@ function buildYouTubeInternalSeekLink(videoId: string, start: number): string {
     t: String(Math.max(0, Math.floor(start)))
   });
   return `#${YOUTUBE_INTERNAL_LINK_HASH}?${params.toString()}`;
+}
+
+async function capturePagePng(rect: DOMRect): Promise<Buffer> {
+  const win = getElectronCurrentWindow();
+  if (!win?.capturePage) {
+    throw new Error("Electron window capture is not available in this Obsidian environment.");
+  }
+
+  const image = await win.capturePage({
+    height: Math.max(1, Math.round(rect.height)),
+    width: Math.max(1, Math.round(rect.width)),
+    x: Math.max(0, Math.round(rect.left)),
+    y: Math.max(0, Math.round(rect.top))
+  });
+  const png = image?.toPNG?.();
+  if (!Buffer.isBuffer(png) || png.length === 0) {
+    throw new Error("Electron returned an empty screenshot.");
+  }
+  return png;
+}
+
+function getElectronCurrentWindow(): { capturePage?: (rect: { height: number; width: number; x: number; y: number }) => Promise<{ toPNG: () => Buffer }> } | null {
+  try {
+    const electron = require("electron");
+    const remote = electron.remote ?? tryRequire("@electron/remote");
+    return remote?.getCurrentWindow?.()
+      ?? electron.BrowserWindow?.getFocusedWindow?.()
+      ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function tryRequire(id: string): any {
+  try {
+    return require(id);
+  } catch {
+    return null;
+  }
+}
+
+function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+}
+
+function parseYouTubePlayerMessage(data: unknown): { event?: string; info?: { currentTime?: number } } | null {
+  if (typeof data === "string") {
+    try {
+      return JSON.parse(data);
+    } catch {
+      return null;
+    }
+  }
+
+  if (data && typeof data === "object") {
+    return data as { event?: string; info?: { currentTime?: number } };
+  }
+
+  return null;
 }
 
 function parseYouTubeInternalLink(href: string): { start: number; videoId: string } | null {

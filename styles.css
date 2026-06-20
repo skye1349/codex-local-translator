@@ -243,12 +243,34 @@
   background: var(--background-primary);
 }
 
-.contextual-ai-reader-youtube-player-title {
+.contextual-ai-reader-youtube-player-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.contextual-ai-reader-youtube-player-title {
+  flex: 1;
   color: var(--text-muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+.contextual-ai-reader-youtube-player-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--text-muted);
+}
+
+.contextual-ai-reader-youtube-player-button:hover {
+  color: var(--text-normal);
 }
 
 .contextual-ai-reader-youtube-player-frame {
