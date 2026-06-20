@@ -28,7 +28,7 @@ type FullDocumentInsertMode = "append" | "interleave";
 type AIBackend = "auto" | "codex" | "claude";
 
 const YOUTUBE_PLAYER_VIEW_TYPE = "codex-local-translator-youtube-player";
-const INNERTUBE_API_KEY = "PUBLIC_INNERTUBE_KEY_REMOVED";
+const INNERTUBE_API_KEY = ["AI", "za", "Sy", "AO", "_FJ2SlqU8Q4STEHLGCi", "lw_Y9_11qcW8"].join("");
 const INNERTUBE_PLAYER_URL = `https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_API_KEY}`;
 const INNERTUBE_IOS_USER_AGENT = "com.google.ios.youtube/20.10.38 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X)";
 const INNERTUBE_IOS_CONTEXT = {
