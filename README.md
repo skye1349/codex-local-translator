@@ -73,32 +73,204 @@ Keep investment, psychology, and business terms consistent. Preserve Markdown st
 
 ## Usage
 
-Selection translation:
+### Selection Popup
+
+By default, normal text selection does nothing. This avoids interrupting ordinary note-taking.
+
+To open the popup:
 
 1. Open a Markdown note or a selectable PDF.
-2. Hold `Command` and select English text.
-3. The popup appears near the selection.
-4. Use the buttons to read aloud, save to excerpts, copy, or refine with AI.
+2. Hold `Command` on macOS.
+3. While holding `Command`, select English text.
+4. Release the mouse or trackpad.
+5. The popup appears near the selected text.
 
-Single-word vocabulary:
+If you turn off `Require Command key for auto translate`, the popup appears after ordinary text selection. This is not recommended for heavy note-taking workflows.
 
-1. Hold `Command` and select one English word.
-2. The popup shows a local/cache definition immediately when available.
-3. The AI context explanation is generated asynchronously using the surrounding paragraph.
+### Popup Buttons
 
-Current-file translation:
+The popup can show different buttons depending on the selected text and result state:
+
+- Speaker: read the original English text aloud with the system text-to-speech voice.
+- Sparkles: send the selection to the configured AI backend for a higher-quality translation or contextual explanation.
+- Book plus: save the selection, translation, or vocabulary note to the configured excerpt note.
+- Copy: copy the translation or vocabulary note to the system clipboard.
+- Stop: cancel a running AI request and kill the active local CLI process when using Codex or Claude Code.
+
+### Paragraph Translation
+
+When you select a phrase, sentence, or paragraph:
+
+1. Hold `Command` and select the text.
+2. The plugin first tries a quick translation for the popup.
+3. Click the Sparkles button if you want the configured AI backend to refine the translation.
+4. Use Copy or Book plus if you want to keep the result.
+
+For selected paragraphs, the quick popup translation is meant for speed. The Sparkles button is the higher-quality AI path and uses your selected backend, custom prompt, model, and token budget.
+
+### Single-Word Vocabulary
+
+When you select exactly one English word:
+
+1. Hold `Command` and select the word.
+2. The popup first checks the local vocabulary cache and built-in dictionary.
+3. If a local/cache definition exists, it appears immediately.
+4. The plugin then uses the surrounding paragraph and your custom prompt to generate an AI context explanation.
+5. Use Book plus to save the vocabulary note, including the source context.
+
+Single-word mode is different from paragraph translation: it focuses on what the word means in the current paragraph or book, not only on a generic dictionary definition.
+
+### Selection Commands
+
+You can also use commands from the command palette:
+
+- `Translate selection to Chinese`: replaces the selected text with Chinese.
+- `Append Chinese translation below selection`: keeps the original selection and inserts the Chinese translation below it.
+- `Speak selected English text`: reads the selected English text aloud.
+- `Save selection to excerpts`: saves the selected text to your excerpt note with source information.
+
+### Current Markdown File Translation
 
 1. Open a Markdown file.
-2. Run `Command Palette -> Translate current Markdown file: append Chinese below`.
-3. Or run `Command Palette -> Translate current Markdown file: interleave Chinese paragraphs`.
+2. Open the command palette.
+3. Run one of the current-file translation commands.
 
-For long chapters with many tiny EPUB/OCR paragraphs, the plugin automatically merges consecutive short prose paragraphs into larger translation units before sending them to AI. The original English text is preserved, but the Chinese translation may be inserted after a small group of related short paragraphs instead of after every tiny fragment. This greatly reduces repeated prompt and delimiter tokens.
+Available modes:
 
-Batch translation:
+- `Translate current Markdown file: append Chinese below`
+- `Translate current Markdown file: interleave Chinese paragraphs`
 
-1. Run one of the batch translation commands from the command palette.
-2. Enter one Markdown file, folder, or wildcard per line.
-3. The plugin writes directly to the matched Markdown files.
+Append mode:
+
+```text
+Original English content
+
+Chinese translation of the whole note
+```
+
+Use this when you want to keep the English source intact and place the full Chinese translation after it.
+
+Interleave mode:
+
+```text
+English paragraph 1
+
+Chinese paragraph 1
+
+English paragraph 2
+
+Chinese paragraph 2
+```
+
+Use this when you want side-by-side reading in one note. For long chapters with many tiny EPUB/OCR paragraphs, the plugin automatically merges consecutive short prose paragraphs into larger translation units before sending them to AI. The original English text is preserved, but the Chinese translation may be inserted after a small group of related short paragraphs instead of after every tiny fragment. This greatly reduces repeated prompt and delimiter tokens.
+
+Only one full-file or batch translation can run at a time. If another translation is already running, the plugin asks you to stop the current task first.
+
+### Batch Markdown Translation
+
+Use batch translation when you want to translate multiple Markdown files with one command.
+
+1. Open the command palette.
+2. Run one of the batch commands:
+   - `Batch translate Markdown files: append Chinese below`
+   - `Batch translate Markdown files: interleave Chinese paragraphs`
+3. Enter one Markdown file, folder, or wildcard per line.
+4. Click Start.
+
+Batch commands write directly to the matched Markdown files. Back up important notes before running them.
+
+### Batch Path Rules
+
+Batch paths are vault-relative. Do not use absolute filesystem paths.
+
+Correct:
+
+```text
+Books/Trading in the Zone/
+Books/Trading in the Zone/08 - Chapter 1.md
+Books/Trading in the Zone/*.md
+Books/Trading in the Zone/1? - *.md
+Books/Trading in the Zone/**/*.md
+```
+
+Incorrect:
+
+```text
+/Users/me/Documents/Vault/Books/Trading in the Zone/
+```
+
+Supported scopes:
+
+- Single Markdown file: `Books/Example/Chapter 1.md`
+- Folder: `Books/Example/`
+- Simple wildcard: `Books/Example/*.md`
+- Recursive wildcard: `Books/Example/**/*.md`
+- Single-character wildcard: `Books/Example/1? - *.md`
+
+The folder mode recursively includes Markdown files inside the folder.
+
+### Excerpts
+
+Set `Excerpt file` in plugin settings. When you click Book plus or run `Save selection to excerpts`, the plugin appends an entry to that note.
+
+Excerpt entries can include:
+
+- the original selected text;
+- the popup translation when available;
+- the source note path;
+- line references when the selection comes from an open Markdown editor.
+
+If `Open excerpt file after saving` is enabled, the excerpt note opens in a side split after saving.
+
+### Text-to-Speech
+
+Use the Speaker button or the `Speak selected English text` command to read selected English aloud.
+
+Useful settings:
+
+- `Speech language`: defaults to `en-US`.
+- `Speech rate`: defaults to `0.92`.
+
+The plugin uses the system speech synthesis voices available in your Obsidian desktop environment.
+
+### Token Usage And Cancellation
+
+AI-powered actions show token usage when the selected backend reports it.
+
+The token line uses this format:
+
+```text
+input ↑ output ↓ (total, cached)
+```
+
+For long file translation, the progress overlay also shows:
+
+- elapsed time;
+- completed batches;
+- completed translation units;
+- completed source paragraphs;
+- current token usage;
+- a Stop button.
+
+Click Stop to cancel queued work and kill active local CLI processes where possible.
+
+### Custom Prompt / Reading Context
+
+Use `Custom prompt / context` to tell the AI what you are reading and how it should translate.
+
+Good examples:
+
+```text
+I am reading Poor Charlie's Almanack. Translate in natural Simplified Chinese.
+Keep investing, psychology, business, and Munger-related terms consistent.
+```
+
+```text
+I am reading a trading psychology book. Preserve technical trading terms.
+Translate "edge" as "优势" when it means trading advantage.
+```
+
+The custom prompt affects AI refinement, contextual vocabulary explanation, current-file translation, and batch translation. It does not affect the instant local/cache vocabulary lookup.
 
 ## Commands
 
@@ -114,7 +286,7 @@ Batch translation:
 
 ## Batch Scope Examples
 
-Batch paths are vault-relative, not absolute filesystem paths.
+Batch paths are vault-relative, not absolute filesystem paths. See `Batch Path Rules` above for the full behavior.
 
 ```text
 Books/Trading in the Zone/
@@ -123,13 +295,6 @@ Books/Trading in the Zone/*.md
 Books/Trading in the Zone/1? - *.md
 Books/Trading in the Zone/**/*.md
 ```
-
-Supported scope types:
-
-- Single Markdown file.
-- Folder, recursively including Markdown files inside it.
-- Simple wildcard such as `*.md`.
-- Recursive wildcard such as `**/*.md`.
 
 ## Privacy
 
@@ -177,12 +342,10 @@ The plugin folder must contain:
 1. Update `manifest.json` and `versions.json`.
 2. Run `npm run build`.
 3. Commit `main.js`, `manifest.json`, `styles.css`, and source files.
-4. Create a GitHub release whose tag exactly matches `manifest.json` version, for example `1.0.0`.
-5. Upload release assets:
-   - `main.js`
-   - `manifest.json`
-   - `styles.css`
-6. Submit the public repository URL to the Obsidian community plugin review process.
+4. Push `main`.
+5. Push a Git tag whose name exactly matches `manifest.json` version, for example `1.0.3`.
+6. Let the GitHub Actions release workflow create the release assets and artifact attestations.
+7. After the release is published, users can update from the Obsidian community plugin browser.
 
 ## License
 
