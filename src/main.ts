@@ -6,6 +6,7 @@ import { join } from "path";
 import {
   App,
   Editor,
+  ItemView,
   MarkdownView,
   Modal,
   Notice,
@@ -14,6 +15,7 @@ import {
   Setting,
   TFile,
   TFolder,
+  WorkspaceLeaf,
   normalizePath,
   setIcon
 } from "obsidian";
@@ -22,6 +24,8 @@ type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
 type InsertMode = "replace" | "append";
 type FullDocumentInsertMode = "append" | "interleave";
 type AIBackend = "auto" | "codex" | "claude";
+
+const YOUTUBE_PLAYER_VIEW_TYPE = "codex-local-translator-youtube-player";
 
 interface CodexTranslatorSettings {
   aiBackend: AIBackend;
@@ -199,6 +203,11 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
 
+    this.registerView(
+      YOUTUBE_PLAYER_VIEW_TYPE,
+      (leaf) => new YouTubePlayerView(leaf)
+    );
+
     this.statusBarEl = this.addStatusBarItem();
     this.setStatus("");
 
@@ -267,6 +276,14 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "open-youtube-video-in-obsidian",
+      name: "Open YouTube video in Obsidian tab",
+      callback: () => {
+        void this.openYouTubeVideoFromCurrentNote();
+      }
+    });
+
+    this.addCommand({
       id: "speak-selection",
       name: "Speak selected English text",
       editorCallback: (editor: Editor) => {
@@ -283,6 +300,19 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     });
 
     this.addSettingTab(new CodexTranslatorSettingTab(this.app, this));
+
+    this.registerMarkdownPostProcessor((element) => {
+      element.querySelectorAll<HTMLAnchorElement>('a[href^="codex-youtube://"]').forEach((link) => {
+        link.addEventListener("click", (event) => {
+          const target = parseYouTubeInternalLink(link.getAttribute("href") ?? "");
+          if (!target) return;
+
+          event.preventDefault();
+          event.stopPropagation();
+          void this.openYouTubeVideo(target.videoId, target.start);
+        });
+      });
+    });
 
     this.registerDomEvent(document, "selectionchange", () => {
       this.handleSelectionChange();
@@ -1240,6 +1270,40 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     await leaf.openFile(file, { active: false });
   }
 
+  private async openYouTubeVideoFromCurrentNote() {
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+
+    if (!activeView) {
+      new Notice("Open a Markdown note with a YouTube URL first.");
+      return;
+    }
+
+    const candidateText = activeView.editor.getSelection().trim() || activeView.getViewData();
+    const videoId = extractYouTubeVideoId(candidateText);
+
+    if (!videoId) {
+      new Notice("No YouTube URL found in the current note or selection.");
+      return;
+    }
+
+    await this.openYouTubeVideo(videoId, 0);
+  }
+
+  private async openYouTubeVideo(videoId: string, start: number) {
+    const leaves = this.app.workspace.getLeavesOfType(YOUTUBE_PLAYER_VIEW_TYPE);
+    const leaf = leaves[0] ?? this.app.workspace.getLeaf("split", "vertical");
+
+    if (!leaves[0]) {
+      await leaf.setViewState({ type: YOUTUBE_PLAYER_VIEW_TYPE, active: true });
+    }
+
+    const view = leaf.view;
+    if (view instanceof YouTubePlayerView) {
+      view.setVideo(videoId, start);
+      this.app.workspace.revealLeaf(leaf);
+    }
+  }
+
   private async extractYouTubeSubtitlesFromCurrentNote() {
     const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
 
@@ -1259,6 +1323,7 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     this.setStatus("Fetching YouTube subtitles...");
 
     try {
+      await this.openYouTubeVideo(videoId, 0);
       const transcript = await fetchYouTubeTranscript(videoId);
 
       if (transcript.entries.length === 0) {
@@ -1705,6 +1770,68 @@ class TranslationProgressOverlay {
 
   remove() {
     this.el.remove();
+  }
+}
+
+class YouTubePlayerView extends ItemView {
+  private iframe?: HTMLIFrameElement;
+  private titleEl?: HTMLElement;
+  private videoId = "";
+  private start = 0;
+
+  constructor(leaf: WorkspaceLeaf) {
+    super(leaf);
+  }
+
+  getViewType(): string {
+    return YOUTUBE_PLAYER_VIEW_TYPE;
+  }
+
+  getDisplayText(): string {
+    return "YouTube Player";
+  }
+
+  getIcon(): string {
+    return "youtube";
+  }
+
+  async onOpen() {
+    this.containerEl.empty();
+    const root = this.containerEl.createDiv("codex-youtube-player-view");
+    this.titleEl = root.createDiv("codex-youtube-player-title");
+    this.titleEl.setText("YouTube Player");
+
+    this.iframe = root.createEl("iframe", {
+      cls: "codex-youtube-player-frame"
+    });
+    this.iframe.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
+    this.iframe.allowFullscreen = true;
+
+    if (this.videoId) {
+      this.refreshIframe();
+    }
+  }
+
+  setVideo(videoId: string, start: number) {
+    this.videoId = videoId;
+    this.start = Math.max(0, Math.floor(start));
+    this.refreshIframe();
+  }
+
+  private refreshIframe() {
+    if (this.titleEl) {
+      this.titleEl.setText(`YouTube · ${this.videoId} · ${formatTimestamp(this.start)}`);
+    }
+
+    if (!this.iframe || !this.videoId) return;
+
+    const params = new URLSearchParams({
+      autoplay: "1",
+      modestbranding: "1",
+      rel: "0",
+      start: String(this.start)
+    });
+    this.iframe.src = `https://www.youtube.com/embed/${encodeURIComponent(this.videoId)}?${params.toString()}`;
   }
 }
 
@@ -3057,11 +3184,32 @@ function formatYouTubeTranscriptNote(transcript: YouTubeTranscript): string {
 
   for (const entry of transcript.entries) {
     const timestamp = formatTimestamp(entry.start);
-    const seekUrl = `${sourceUrl}&t=${Math.floor(entry.start)}s`;
+    const seekUrl = `codex-youtube://${transcript.videoId}?t=${Math.floor(entry.start)}`;
     lines.push(`- [${timestamp}](${seekUrl}) ${entry.text}`);
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+function parseYouTubeInternalLink(href: string): { start: number; videoId: string } | null {
+  try {
+    const url = new URL(href);
+    if (url.protocol !== "codex-youtube:") {
+      return null;
+    }
+
+    const videoId = normalizeYouTubeVideoId(url.hostname);
+    if (!videoId) {
+      return null;
+    }
+
+    return {
+      start: Number.parseInt(url.searchParams.get("t") ?? "0", 10) || 0,
+      videoId
+    };
+  } catch {
+    return null;
+  }
 }
 
 function formatTimestamp(seconds: number): string {

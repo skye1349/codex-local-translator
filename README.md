@@ -12,7 +12,7 @@ Translate selected text, whole notes, or batches of Markdown files in Obsidian t
 - Show a translation popup only when you hold `Command` while selecting text.
 - Look up a selected English word with instant local/cache definitions and optional AI context explanation.
 - Translate selected text from Obsidian-readable PDFs when the PDF text layer can be selected.
-- Extract public YouTube subtitles from a note URL into a Markdown transcript note.
+- Open a YouTube video in an Obsidian tab and extract public subtitles into a timestamped Markdown transcript note.
 - Read selected English text aloud with the system text-to-speech voice.
 - Save selected passages to an excerpt note with source file and line references.
 - Translate the current Markdown file and append the Chinese version below the original.
@@ -69,6 +69,7 @@ Batch commands accept one file, folder, or wildcard per line.
 - `Translate current Markdown file: interleave Chinese paragraphs`
 - `Batch translate Markdown files: append Chinese below`
 - `Batch translate Markdown files: interleave Chinese paragraphs`
+- `Open YouTube video in Obsidian tab`
 - `Extract YouTube subtitles from current note`
 - `Check Codex login`
 
