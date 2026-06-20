@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import { existsSync, readdirSync } from "fs";
 import { mkdtemp, readFile, rm } from "fs/promises";
+import { get as httpsGet } from "https";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import {
@@ -3085,13 +3086,7 @@ function normalizeYouTubeVideoId(value: string): string | null {
 
 async function fetchYouTubeTranscript(videoId: string): Promise<YouTubeTranscript> {
   const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en`;
-  const watchResponse = await fetch(watchUrl);
-
-  if (!watchResponse.ok) {
-    throw new Error(`YouTube page HTTP ${watchResponse.status}`);
-  }
-
-  const html = await watchResponse.text();
+  const html = await fetchTextWithNode(watchUrl);
   const playerResponse = extractYouTubePlayerResponse(html);
   const title = String(playerResponse?.videoDetails?.title ?? videoId);
   const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
@@ -3107,17 +3102,53 @@ async function fetchYouTubeTranscript(videoId: string): Promise<YouTubeTranscrip
     throw new Error("Subtitle track has no downloadable URL.");
   }
 
-  const transcriptResponse = await fetch(baseUrl);
-
-  if (!transcriptResponse.ok) {
-    throw new Error(`Subtitle track HTTP ${transcriptResponse.status}`);
-  }
-
   return {
-    entries: parseYouTubeTranscriptXml(await transcriptResponse.text()),
+    entries: parseYouTubeTranscriptXml(await fetchTextWithNode(baseUrl)),
     title,
     videoId
   };
+}
+
+function fetchTextWithNode(url: string, redirectCount = 0): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const request = httpsGet(url, {
+      headers: {
+        "accept-language": "en-US,en;q=0.9",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+      }
+    }, (response) => {
+      const statusCode = response.statusCode ?? 0;
+      const location = response.headers.location;
+
+      if (statusCode >= 300 && statusCode < 400 && location) {
+        response.resume();
+        if (redirectCount >= 5) {
+          reject(new Error("Too many redirects while fetching YouTube subtitles."));
+          return;
+        }
+
+        const nextUrl = new URL(location, url).toString();
+        fetchTextWithNode(nextUrl, redirectCount + 1).then(resolve, reject);
+        return;
+      }
+
+      if (statusCode < 200 || statusCode >= 300) {
+        response.resume();
+        reject(new Error(`HTTP ${statusCode} while fetching YouTube subtitles.`));
+        return;
+      }
+
+      response.setEncoding("utf8");
+      let body = "";
+      response.on("data", (chunk) => { body += chunk; });
+      response.on("end", () => resolve(body));
+    });
+
+    request.on("error", reject);
+    request.setTimeout(20_000, () => {
+      request.destroy(new Error("Timed out while fetching YouTube subtitles."));
+    });
+  });
 }
 
 function extractYouTubePlayerResponse(html: string): any {
