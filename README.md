@@ -1,63 +1,102 @@
 # Contextual AI Reader for Obsidian
 
-Read, translate, explain, and extract learning material from Markdown, PDFs, and YouTube videos in Obsidian through a locally logged-in AI coding assistant CLI.
+Contextual AI Reader is an Obsidian desktop plugin for reading English material with AI-assisted Chinese translation, vocabulary explanation, text-to-speech, excerpts, and Markdown file translation.
 
-> This is an unofficial community plugin. It is not affiliated with OpenAI or Obsidian.
+It can use local AI assistant CLIs such as Codex and Claude Code, or direct API-token backends such as OpenAI and Anthropic.
 
-![Selection translation popup](docs/assets/selection-popup.svg)
+This is an unofficial community plugin. It is not affiliated with OpenAI, Anthropic, or Obsidian.
 
-## What It Does
+## Features
 
-- Translate selected Markdown to Simplified Chinese.
-- Show a translation popup only when you hold `Command` while selecting text.
-- Look up a selected English word with instant local/cache definitions and optional AI context explanation.
-- Translate selected text from Obsidian-readable PDFs when the PDF text layer can be selected.
-- Open a YouTube video in an Obsidian tab and extract public subtitles into a timestamped Markdown transcript note.
+- Translate selected text to Simplified Chinese.
+- Show the selection popup only when holding `Command` while selecting text.
+- Explain a selected English word with local/cache definitions first, then optionally enrich it with AI using the current paragraph as context.
+- Translate selected text from PDFs when Obsidian can select the PDF text layer.
 - Read selected English text aloud with the system text-to-speech voice.
-- Save selected passages to an excerpt note with source file and line references.
-- Translate the current Markdown file and append the Chinese version below the original.
+- Save selected passages or vocabulary notes to an excerpt note with source references.
+- Translate the current Markdown file and append the Chinese translation below the original.
 - Translate the current Markdown file into interleaved English/Chinese paragraphs.
 - Batch translate multiple Markdown files by file path, folder path, or wildcard.
-- Use Codex or Claude Code without API keys.
-- Show actual token usage after AI-powered translation or vocabulary explanation when the local backend reports it.
-- Use a custom prompt/context for book, domain, terminology, or style guidance.
+- Show token usage after AI calls when the selected backend reports usage.
+- Add custom reading context, terminology, and translation style instructions.
 
-## Requirements
+## AI Backends
 
-- Obsidian desktop. This plugin is desktop-only.
-- Codex installed locally, either through Codex.app or the Codex CLI, or Claude Code installed locally.
-- A local login for the backend you use: Codex with your ChatGPT account, or Claude Code with your Claude account.
+Open plugin settings and choose `AI backend`.
 
-This plugin does not use OpenAI or Anthropic API keys. It shells out to local `codex` or `claude` executables and uses your existing local login.
+Available modes:
 
-## Privacy And Data
+- `Auto`: use local Codex first when available, then local Claude Code.
+- `Codex`: use a local Codex executable and your local Codex/ChatGPT login.
+- `Claude Code`: use a local Claude Code executable and your local Claude login.
+- `OpenAI API token`: call the OpenAI Chat Completions API with your configured API key.
+- `Anthropic API token`: call the Anthropic Messages API with your configured API key.
 
-Selected text and Markdown file contents are sent to the configured backend for translation through the local executable. This is not offline translation.
+The default mode is `Auto`, so existing local Codex usage remains the default path.
 
-The plugin stores only local plugin settings in your vault, such as model name, timeout, excerpt note path, and custom prompt. It does not store API keys.
+## Configuration
 
-Batch and full-file commands write directly to your Markdown files. Back up your vault before running bulk operations on important notes.
+Recommended basic settings:
 
-## Screenshots
+- `AI backend`: leave as `Auto` if you want Codex first and Claude Code as fallback.
+- `Require Command key for auto translate`: keep enabled so normal text selection does not trigger translation.
+- `Custom prompt / context`: add the book, domain, terminology, and tone you want the AI to respect.
+- `Timeout`: increase this for long full-file or batch translation.
+- `Single-shot translation limit`: smaller notes are translated in one request for better context.
+- `Batch chunk size`: larger chunks reduce process startup overhead and repeated prompt tokens.
 
-### Selection Popup
+Local backend settings:
 
-Hold `Command` while selecting text to show a translation popup. The popup includes read-aloud, excerpt, and copy actions.
-For single English words, the popup shows a local/cache vocabulary note first and can enrich it with Codex or Claude Code using the current paragraph as context.
+- `Codex command`: optional path to `codex`; leave empty to auto-detect.
+- `Codex model`: model used by Codex.
+- `Reasoning effort`: defaults to `none`, which is usually best for translation speed and cost.
+- `Claude command`: optional path to `claude`; leave empty to auto-detect.
+- `Claude model`: model used by Claude Code.
 
-![Selection translation popup](docs/assets/selection-popup.svg)
+API backend settings:
 
-### Full Note Translation
+- `OpenAI API key`: required only when using `OpenAI API token`.
+- `OpenAI model`: defaults to `gpt-4.1-mini`.
+- `OpenAI base URL`: defaults to `https://api.openai.com/v1`; can be changed for compatible endpoints.
+- `Anthropic API key`: required only when using `Anthropic API token`.
+- `Anthropic model`: defaults to `claude-sonnet-4-5`.
+- `Anthropic base URL`: defaults to `https://api.anthropic.com/v1`.
 
-Full-note commands can append the full Chinese translation at the bottom or insert Chinese text after each source paragraph.
+API keys are stored in this plugin's local Obsidian settings data. Do not publish your vault's `.obsidian/plugins/.../data.json` file.
 
-![Full note commands](docs/assets/full-note-commands.svg)
+Example custom prompt:
 
-### Batch Translation
+```text
+I am reading Poor Charlie's Almanack. Translate into natural Simplified Chinese.
+Keep investment, psychology, and business terms consistent. Preserve Markdown structure.
+```
 
-Batch commands accept one file, folder, or wildcard per line.
+## Usage
 
-![Batch translation modal](docs/assets/batch-modal.svg)
+Selection translation:
+
+1. Open a Markdown note or a selectable PDF.
+2. Hold `Command` and select English text.
+3. The popup appears near the selection.
+4. Use the buttons to read aloud, save to excerpts, copy, or refine with AI.
+
+Single-word vocabulary:
+
+1. Hold `Command` and select one English word.
+2. The popup shows a local/cache definition immediately when available.
+3. The AI context explanation is generated asynchronously using the surrounding paragraph.
+
+Current-file translation:
+
+1. Open a Markdown file.
+2. Run `Command Palette -> Translate current Markdown file: append Chinese below`.
+3. Or run `Command Palette -> Translate current Markdown file: interleave Chinese paragraphs`.
+
+Batch translation:
+
+1. Run one of the batch translation commands from the command palette.
+2. Enter one Markdown file, folder, or wildcard per line.
+3. The plugin writes directly to the matched Markdown files.
 
 ## Commands
 
@@ -69,19 +108,18 @@ Batch commands accept one file, folder, or wildcard per line.
 - `Translate current Markdown file: interleave Chinese paragraphs`
 - `Batch translate Markdown files: append Chinese below`
 - `Batch translate Markdown files: interleave Chinese paragraphs`
-- `Open YouTube video in Obsidian tab`
-- `Extract YouTube subtitles from current note`
 - `Check Codex login`
 
 ## Batch Scope Examples
 
-Batch commands accept vault-relative paths, not absolute filesystem paths:
+Batch paths are vault-relative, not absolute filesystem paths.
 
 ```text
-Books/Example Book/
-Books/Example Book/08 - Chapter 1.md
-Books/Example Book/*.md
-Books/Example Book/**/*.md
+Books/Trading in the Zone/
+Books/Trading in the Zone/08 - Chapter 1.md
+Books/Trading in the Zone/*.md
+Books/Trading in the Zone/1? - *.md
+Books/Trading in the Zone/**/*.md
 ```
 
 Supported scope types:
@@ -91,35 +129,22 @@ Supported scope types:
 - Simple wildcard such as `*.md`.
 - Recursive wildcard such as `**/*.md`.
 
-## Settings
+## Privacy
 
-- `Auto translate selection`: show a popup after text is selected.
-- `Require Command key for auto translate`: only show the popup when `Command` is held during selection. Enabled by default.
-- `AI backend`: `Auto`, `Codex`, or `Claude Code`. Auto uses Codex when available, then falls back to Claude Code.
-- `Custom prompt / context`: add book, topic, terminology, style, or translation preferences.
-- `Excerpt file`: vault path for saved passages.
-- `YouTube transcript folder`: vault folder for extracted subtitle notes.
-- `Open excerpt file after saving`: open the excerpt note in a right-side split.
-- `Include translation in excerpts`: save the popup translation when available.
-- `Speech language`: defaults to `en-US`.
-- `Speech rate`: defaults to `0.92`.
-- `Codex command`: leave empty to auto-detect Codex.app or a local CLI.
-- `Claude command`: leave empty to auto-detect Claude Code.
-- `Model`: defaults to `gpt-5.4-mini`.
-- `Claude model`: defaults to `claude-sonnet-4-5`.
-- `Reasoning effort`: defaults to `none`.
-- `Timeout`: maximum seconds for each AI invocation.
-- `Single-shot translation limit`: notes under this character count are translated in one request.
-- `Batch chunk size`: larger chunks reduce process startup overhead and repeated prompt tokens.
+This plugin is not offline translation.
 
-Example custom prompt:
+Depending on your selected backend, selected text and Markdown content may be sent to:
 
-```text
-I am reading a trading psychology book. Translate in natural Simplified Chinese,
-preserve Markdown structure, and keep recurring trading terms consistent.
-```
+- local Codex CLI/App through your local Codex login;
+- local Claude Code through your local Claude login;
+- OpenAI API using your configured API key;
+- Anthropic API using your configured API key.
 
-## Local Development
+The plugin stores settings locally in Obsidian. It does not intentionally publish or upload settings, but API keys stored in plugin settings are sensitive. Do not commit Obsidian plugin data files to a public repository.
+
+Full-file and batch translation commands modify Markdown files directly. Back up important vaults before running bulk operations.
+
+## Development
 
 Install dependencies:
 
@@ -133,7 +158,7 @@ Build:
 npm run build
 ```
 
-Manual install for development:
+Manual development install:
 
 ```text
 <vault>/.obsidian/plugins/contextual-ai-reader/
@@ -145,9 +170,7 @@ The plugin folder must contain:
 - `main.js`
 - `styles.css`
 
-## Release Checklist
-
-For an Obsidian Community Plugin release:
+## Community Plugin Release Checklist
 
 1. Update `manifest.json` and `versions.json`.
 2. Run `npm run build`.
@@ -157,7 +180,7 @@ For an Obsidian Community Plugin release:
    - `main.js`
    - `manifest.json`
    - `styles.css`
-6. Submit the public repository URL through the Obsidian Community directory.
+6. Submit the public repository URL to the Obsidian community plugin review process.
 
 ## License
 

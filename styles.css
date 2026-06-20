@@ -119,21 +119,6 @@
   font-family: var(--font-monospace);
 }
 
-.contextual-ai-reader-youtube-url-input {
-  box-sizing: border-box;
-  width: 100%;
-  font-family: var(--font-monospace);
-}
-
-.contextual-ai-reader-youtube-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 12px;
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
 .contextual-ai-reader-batch-actions {
   display: flex;
   gap: 8px;
@@ -216,69 +201,6 @@
   overflow: hidden;
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-.contextual-ai-reader-youtube-timestamp {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  color: var(--link-color);
-  cursor: pointer;
-  font: inherit;
-  font-variant-numeric: tabular-nums;
-  padding: 0;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.contextual-ai-reader-youtube-timestamp:hover {
-  color: var(--link-color-hover);
-}
-
-.contextual-ai-reader-youtube-player-view {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 240px;
-  background: var(--background-primary);
-}
-
-.contextual-ai-reader-youtube-player-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--background-modifier-border);
-}
-
-.contextual-ai-reader-youtube-player-title {
-  flex: 1;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.contextual-ai-reader-youtube-player-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border-radius: 6px;
-  color: var(--text-muted);
-}
-
-.contextual-ai-reader-youtube-player-button:hover {
-  color: var(--text-normal);
-}
-
-.contextual-ai-reader-youtube-player-webview {
-  flex: 1;
-  width: 100%;
-  min-height: 320px;
-  border: 0;
-  background: #000;
 }
 
 /* ── Popup loading state ── */

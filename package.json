@@ -1,7 +1,7 @@
 {
   "name": "contextual-ai-reader",
   "version": "1.0.0",
-  "description": "AI reading companion for translation, contextual vocabulary, PDFs, YouTube transcripts, and Markdown notes.",
+  "description": "AI reading companion for translation, contextual vocabulary, PDFs, and Markdown notes.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
@@ -12,7 +12,6 @@
     "codex",
     "translation",
     "reading",
-    "youtube",
     "vocabulary"
   ],
   "author": "Contextual AI Reader contributors",

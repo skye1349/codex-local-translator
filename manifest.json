@@ -3,7 +3,7 @@
   "name": "Contextual AI Reader",
   "version": "1.0.0",
   "minAppVersion": "1.5.0",
-  "description": "AI reading companion for translation, contextual vocabulary, PDFs, YouTube transcripts, and Markdown notes.",
+  "description": "AI reading companion for translation, contextual vocabulary, PDFs, and Markdown notes.",
   "author": "Contextual AI Reader contributors",
   "isDesktopOnly": true
 }

@@ -1,50 +1,28 @@
 import { spawn } from "child_process";
 import { existsSync, readdirSync } from "fs";
 import { mkdtemp, readFile, rm } from "fs/promises";
-import { request as httpsRequest } from "https";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import {
   App,
   Editor,
-  ItemView,
   MarkdownView,
   Modal,
   Notice,
   Plugin,
   PluginSettingTab,
+  requestUrl,
   Setting,
   TFile,
   TFolder,
-  WorkspaceLeaf,
   normalizePath,
-  requestUrl,
   setIcon
 } from "obsidian";
 
 type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
 type InsertMode = "replace" | "append";
 type FullDocumentInsertMode = "append" | "interleave";
-type AIBackend = "auto" | "codex" | "claude";
-
-const YOUTUBE_PLAYER_VIEW_TYPE = "contextual-ai-reader-youtube-player";
-const YOUTUBE_INTERNAL_LINK_HASH = "contextual-ai-reader-youtube";
-const YOUTUBE_TRANSCRIPT_MIN_LINES_PER_BLOCK = 3;
-const YOUTUBE_TRANSCRIPT_MAX_LINES_PER_BLOCK = 7;
-const YOUTUBE_TRANSCRIPT_MIN_CHARS_PER_BLOCK = 80;
-const YOUTUBE_TRANSCRIPT_MAX_CHARS_PER_BLOCK = 300;
-const YOUTUBE_TRANSCRIPT_MAX_SECONDS_PER_BLOCK = 24;
-const INNERTUBE_API_KEY = ["AI", "za", "Sy", "AO", "_FJ2SlqU8Q4STEHLGCi", "lw_Y9_11qcW8"].join("");
-const INNERTUBE_PLAYER_URL = `https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_API_KEY}`;
-const INNERTUBE_IOS_USER_AGENT = "com.google.ios.youtube/20.10.38 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X)";
-const INNERTUBE_IOS_CONTEXT = {
-  client: {
-    clientName: "IOS",
-    clientVersion: "20.10.38",
-    gl: "US",
-    hl: "en"
-  }
-};
+type AIBackend = "auto" | "codex" | "claude" | "openai" | "anthropic";
 
 interface ContextualAIReaderSettings {
   aiBackend: AIBackend;
@@ -60,6 +38,12 @@ interface ContextualAIReaderSettings {
   minSelectionChars: number;
   model: string;
   openExcerptAfterSave: boolean;
+  openaiApiKey: string;
+  openaiBaseUrl: string;
+  openaiModel: string;
+  anthropicApiKey: string;
+  anthropicBaseUrl: string;
+  anthropicModel: string;
   reasoningEffort: ReasoningEffort;
   requireCommandForAutoTranslate: boolean;
   singleShotMaxChars: number;
@@ -67,8 +51,6 @@ interface ContextualAIReaderSettings {
   speechRate: number;
   timeoutSeconds: number;
   vocabularyCache: Record<string, VocabularyCacheEntry>;
-  youtubeScreenshotFolder: string;
-  youtubeTranscriptFolder: string;
 }
 
 const DEFAULT_SETTINGS: ContextualAIReaderSettings = {
@@ -85,15 +67,19 @@ const DEFAULT_SETTINGS: ContextualAIReaderSettings = {
   minSelectionChars: 2,
   model: "gpt-5.4-mini",
   openExcerptAfterSave: true,
+  openaiApiKey: "",
+  openaiBaseUrl: "https://api.openai.com/v1",
+  openaiModel: "gpt-4.1-mini",
+  anthropicApiKey: "",
+  anthropicBaseUrl: "https://api.anthropic.com/v1",
+  anthropicModel: "claude-sonnet-4-5",
   reasoningEffort: "none",
   singleShotMaxChars: 30000,
   requireCommandForAutoTranslate: true,
   speechLanguage: "en-US",
   speechRate: 0.92,
   timeoutSeconds: 90,
-  vocabularyCache: {},
-  youtubeScreenshotFolder: "YouTube Screenshots",
-  youtubeTranscriptFolder: "YouTube Transcripts"
+  vocabularyCache: {}
 };
 
 const CODEX_CANDIDATES = [
@@ -166,6 +152,41 @@ interface ClaudeJsonResult {
   };
 }
 
+interface OpenAIChatCompletionResult {
+  choices?: Array<{
+    message?: {
+      content?: string | Array<{ text?: string; type?: string }>;
+    };
+  }>;
+  error?: {
+    message?: string;
+  };
+  usage?: {
+    cached_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens?: number;
+    prompt_tokens_details?: {
+      cached_tokens?: number;
+    };
+  };
+}
+
+interface AnthropicMessageResult {
+  content?: Array<{
+    text?: string;
+    type?: string;
+  }>;
+  error?: {
+    message?: string;
+  };
+  usage?: {
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+    input_tokens?: number;
+    output_tokens?: number;
+  };
+}
+
 interface TokenUsage {
   cachedInput: number;
   input: number;
@@ -194,29 +215,6 @@ interface VocabularyCard {
   word: string;
 }
 
-interface YouTubeTranscript {
-  entries: YouTubeTranscriptEntry[];
-  title: string;
-  videoId: string;
-}
-
-interface YouTubeTranscriptEntry {
-  duration: number;
-  start: number;
-  text: string;
-}
-
-interface YouTubeInputResult {
-  openVideo: boolean;
-  url: string;
-}
-
-interface YouTubeScreenshot {
-  png: Buffer;
-  start: number;
-  videoId: string;
-}
-
 export default class ContextualAIReaderPlugin extends Plugin {
   settings: ContextualAIReaderSettings = DEFAULT_SETTINGS;
   private autoTimer?: number;
@@ -234,11 +232,6 @@ export default class ContextualAIReaderPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
-
-    this.registerView(
-      YOUTUBE_PLAYER_VIEW_TYPE,
-      (leaf) => new YouTubePlayerView(leaf, this)
-    );
 
     this.statusBarEl = this.addStatusBarItem();
     this.setStatus("");
@@ -300,30 +293,6 @@ export default class ContextualAIReaderPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "extract-youtube-subtitles-to-note",
-      name: "Extract YouTube subtitles from current note",
-      callback: () => {
-        void this.extractYouTubeSubtitlesFromCurrentNote();
-      }
-    });
-
-    this.addCommand({
-      id: "open-youtube-video-in-obsidian",
-      name: "Open YouTube video in Obsidian tab",
-      callback: () => {
-        void this.openYouTubeVideoFromCurrentNote();
-      }
-    });
-
-    this.addCommand({
-      id: "capture-youtube-screenshot-to-note",
-      name: "Capture YouTube screenshot to current note",
-      callback: () => {
-        void this.captureYouTubeScreenshotToNote();
-      }
-    });
-
-    this.addCommand({
       id: "speak-selection",
       name: "Speak selected English text",
       editorCallback: (editor: Editor) => {
@@ -340,43 +309,6 @@ export default class ContextualAIReaderPlugin extends Plugin {
     });
 
     this.addSettingTab(new ContextualAIReaderSettingTab(this.app, this));
-
-    const handleYouTubeTimestampEvent = (event: MouseEvent) => {
-      const target = getYouTubeTimestampTarget(event.target);
-      if (!target) return;
-
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation();
-      void this.openYouTubeVideo(target.videoId, target.start, true);
-    };
-
-    this.registerDomEvent(document, "mousedown", handleYouTubeTimestampEvent, true);
-    this.registerDomEvent(document, "click", handleYouTubeTimestampEvent, true);
-    this.registerDomEvent(document, "auxclick", handleYouTubeTimestampEvent, true);
-
-    this.registerMarkdownPostProcessor((element) => {
-      element.querySelectorAll<HTMLAnchorElement>('a[href^="codex-youtube://"], a[href*="#contextual-ai-reader-youtube"]').forEach((link) => {
-        const target = parseYouTubeInternalLink(link.getAttribute("href") ?? "");
-        if (!target) {
-          return;
-        }
-
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "contextual-ai-reader-youtube-timestamp";
-        button.dataset.videoId = target.videoId;
-        button.dataset.start = String(target.start);
-        button.title = `Jump YouTube player to ${formatTimestamp(target.start)}`;
-        button.setText(link.getText() || formatTimestamp(target.start));
-        button.addEventListener("click", (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          void this.openYouTubeVideo(target.videoId, target.start, true);
-        });
-        link.replaceWith(button);
-      });
-    });
 
     this.registerDomEvent(document, "selectionchange", () => {
       this.handleSelectionChange();
@@ -984,9 +916,20 @@ export default class ContextualAIReaderPlugin extends Plugin {
   }
 
   private async runAIPrompt(prompt: string, onChunk?: (text: string) => void): Promise<string> {
-    if (this.getEffectiveBackend() === "claude") {
+    const backend = this.getEffectiveBackend();
+
+    if (backend === "claude") {
       return await this.runClaudePrompt(prompt, onChunk);
     }
+
+    if (backend === "openai") {
+      return await this.runOpenAIPrompt(prompt);
+    }
+
+    if (backend === "anthropic") {
+      return await this.runAnthropicPrompt(prompt);
+    }
+
     return await this.runCodexPrompt(prompt);
   }
 
@@ -1094,6 +1037,99 @@ export default class ContextualAIReaderPlugin extends Plugin {
     } finally {
       await rm(tempDir, { force: true, recursive: true });
     }
+  }
+
+  private async runOpenAIPrompt(prompt: string): Promise<string> {
+    const apiKey = this.settings.openaiApiKey.trim();
+    if (!apiKey) {
+      throw new Error("OpenAI API key is not configured.");
+    }
+
+    const baseUrl = normalizeApiBaseUrl(this.settings.openaiBaseUrl, DEFAULT_SETTINGS.openaiBaseUrl);
+    const model = this.settings.openaiModel.trim() || DEFAULT_SETTINGS.openaiModel;
+    const response = await requestUrl({
+      url: `${baseUrl}/chat/completions`,
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: "Follow the user prompt exactly. Return only the requested content." },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.2
+      }),
+      throw: false
+    });
+
+    const data = response.json as OpenAIChatCompletionResult | undefined;
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(data?.error?.message || `OpenAI API HTTP ${response.status}`);
+    }
+
+    const usage = data?.usage;
+    if (usage) {
+      const cachedInput = usage.prompt_tokens_details?.cached_tokens ?? usage.cached_tokens ?? 0;
+      this.recordTokenUsage({
+        cachedInput,
+        input: usage.prompt_tokens ?? 0,
+        output: usage.completion_tokens ?? 0,
+        reasoningOutput: 0
+      });
+    }
+
+    const content = data?.choices?.[0]?.message?.content;
+    return normalizeAITextContent(content);
+  }
+
+  private async runAnthropicPrompt(prompt: string): Promise<string> {
+    const apiKey = this.settings.anthropicApiKey.trim();
+    if (!apiKey) {
+      throw new Error("Anthropic API key is not configured.");
+    }
+
+    const baseUrl = normalizeApiBaseUrl(this.settings.anthropicBaseUrl, DEFAULT_SETTINGS.anthropicBaseUrl);
+    const model = this.settings.anthropicModel.trim() || DEFAULT_SETTINGS.anthropicModel;
+    const response = await requestUrl({
+      url: `${baseUrl}/messages`,
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 8192,
+        temperature: 0.2,
+        system: "Follow the user prompt exactly. Return only the requested content.",
+        messages: [
+          { role: "user", content: prompt }
+        ]
+      }),
+      throw: false
+    });
+
+    const data = response.json as AnthropicMessageResult | undefined;
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(data?.error?.message || `Anthropic API HTTP ${response.status}`);
+    }
+
+    const usage = data?.usage;
+    if (usage) {
+      const cachedInput = usage.cache_read_input_tokens ?? 0;
+      this.recordTokenUsage({
+        cachedInput,
+        input: (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + cachedInput,
+        output: usage.output_tokens ?? 0,
+        reasoningOutput: 0
+      });
+    }
+
+    return normalizeAITextContent(data?.content);
   }
 
   stopCurrentTranslation() {
@@ -1241,6 +1277,14 @@ export default class ContextualAIReaderPlugin extends Plugin {
       return "codex";
     }
 
+    if (this.settings.aiBackend === "openai") {
+      return "openai";
+    }
+
+    if (this.settings.aiBackend === "anthropic") {
+      return "anthropic";
+    }
+
     if (hasCodexCommand(this.settings.codexCommand)) {
       return "codex";
     }
@@ -1253,7 +1297,11 @@ export default class ContextualAIReaderPlugin extends Plugin {
   }
 
   private getBackendLabel(): string {
-    return this.getEffectiveBackend() === "claude" ? "Claude Code" : "Codex";
+    const backend = this.getEffectiveBackend();
+    if (backend === "claude") return "Claude Code";
+    if (backend === "openai") return "OpenAI API";
+    if (backend === "anthropic") return "Anthropic API";
+    return "Codex";
   }
 
   private async ensureExcerptFile(): Promise<TFile> {
@@ -1332,163 +1380,6 @@ export default class ContextualAIReaderPlugin extends Plugin {
   private async openExcerptFile(file: TFile) {
     const leaf = this.app.workspace.getLeaf("split", "vertical");
     await leaf.openFile(file, { active: false });
-  }
-
-  private async openYouTubeVideoFromCurrentNote() {
-    const input = await this.promptForYouTubeUrl("Open YouTube video", false);
-    if (!input?.url) return;
-
-    const videoId = extractYouTubeVideoId(input.url);
-
-    if (!videoId) {
-      new Notice("Enter a valid YouTube URL.");
-      return;
-    }
-
-    await this.openYouTubeVideo(videoId, 0);
-  }
-
-  private async openYouTubeVideo(videoId: string, start: number, notify = false) {
-    const leaves = this.app.workspace.getLeavesOfType(YOUTUBE_PLAYER_VIEW_TYPE);
-    const leaf = leaves[0] ?? this.app.workspace.getLeaf("split", "vertical");
-
-    if (leaf.view.getViewType() !== YOUTUBE_PLAYER_VIEW_TYPE) {
-      await leaf.setViewState({ type: YOUTUBE_PLAYER_VIEW_TYPE, active: false });
-    }
-
-    const view = leaf.view;
-    if (view instanceof YouTubePlayerView) {
-      view.setVideo(videoId, start);
-      this.app.workspace.revealLeaf(leaf);
-      if (notify) {
-        new Notice(`YouTube → ${formatTimestamp(start)}`, 1800);
-      }
-    }
-  }
-
-  async captureYouTubeScreenshotToNote() {
-    const playerView = this.getYouTubePlayerView();
-    if (!playerView?.hasVideo()) {
-      new Notice("Open a YouTube video in the plugin player first.");
-      return;
-    }
-
-    const targetView = this.getTargetMarkdownView();
-    if (!targetView?.file) {
-      new Notice("Open a Markdown note where the screenshot should be inserted.");
-      return;
-    }
-
-    try {
-      const shot = await playerView.captureFramePng();
-      const folder = normalizePath(this.settings.youtubeScreenshotFolder.trim() || DEFAULT_SETTINGS.youtubeScreenshotFolder);
-      const timestamp = formatTimestamp(shot.start).replace(/:/g, "-");
-      const fileName = `${sanitizeFileName(`YouTube ${shot.videoId} ${timestamp}`)}.png`;
-      const path = await this.getAvailableVaultPath(`${folder}/${fileName}`);
-      await this.ensureParentFolders(path);
-      const screenshotFile = await this.app.vault.createBinary(path, bufferToArrayBuffer(shot.png));
-      const embed = this.createScreenshotEmbed(screenshotFile, targetView.file, shot);
-      targetView.editor.replaceSelection(embed);
-      new Notice(`YouTube screenshot inserted: ${formatTimestamp(shot.start)}`);
-    } catch (error) {
-      new Notice(`Could not capture YouTube screenshot: ${getErrorMessage(error)}`, 9000);
-      console.error("Could not capture YouTube screenshot", error);
-    }
-  }
-
-  private getYouTubePlayerView(): YouTubePlayerView | null {
-    for (const leaf of this.app.workspace.getLeavesOfType(YOUTUBE_PLAYER_VIEW_TYPE)) {
-      if (leaf.view instanceof YouTubePlayerView) {
-        return leaf.view;
-      }
-    }
-    return null;
-  }
-
-  private getTargetMarkdownView(): MarkdownView | null {
-    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (activeView) {
-      return activeView;
-    }
-
-    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-      if (leaf.view instanceof MarkdownView) {
-        return leaf.view;
-      }
-    }
-
-    return null;
-  }
-
-  private createScreenshotEmbed(file: TFile, targetFile: TFile, shot: YouTubeScreenshot): string {
-    const timestamp = formatTimestamp(shot.start);
-    const imageLink = this.app.fileManager.generateMarkdownLink(file, targetFile.path, "", `${shot.videoId} - ${timestamp}`);
-    const imageEmbed = imageLink.startsWith("!") ? imageLink : `!${imageLink}`;
-    const timestampLink = `[${timestamp}](${buildYouTubeInternalSeekLink(shot.videoId, shot.start)})`;
-    return `\n${imageEmbed}\n${timestampLink}\n`;
-  }
-
-  private async extractYouTubeSubtitlesFromCurrentNote() {
-    const input = await this.promptForYouTubeUrl("Extract YouTube subtitles", true);
-    if (!input?.url) return;
-
-    const videoId = extractYouTubeVideoId(input.url);
-
-    if (!videoId) {
-      new Notice("Enter a valid YouTube URL.");
-      return;
-    }
-
-    this.setStatus("Fetching YouTube subtitles...");
-
-    try {
-      if (input.openVideo) {
-        await this.openYouTubeVideo(videoId, 0);
-      }
-      const transcript = await fetchYouTubeTranscript(videoId);
-
-      if (transcript.entries.length === 0) {
-        throw new Error("No subtitle entries found.");
-      }
-
-      const folder = normalizePath(this.settings.youtubeTranscriptFolder.trim() || DEFAULT_SETTINGS.youtubeTranscriptFolder);
-      const fileName = `${sanitizeFileName(transcript.title || transcript.videoId)} Transcript.md`;
-      const path = await this.getAvailableVaultPath(`${folder}/${fileName}`);
-      await this.ensureParentFolders(path);
-      const file = await this.app.vault.create(path, formatYouTubeTranscriptNote(transcript));
-      await this.openExcerptFile(file);
-      new Notice(`YouTube transcript extracted: ${groupYouTubeTranscriptEntries(transcript.entries).length} blocks from ${transcript.entries.length} caption lines.`);
-    } catch (error) {
-      new Notice(`Could not extract YouTube subtitles: ${getErrorMessage(error)}`, 9000);
-      console.error("Could not extract YouTube subtitles", error);
-    } finally {
-      this.setStatus("");
-    }
-  }
-
-  private async promptForYouTubeUrl(title: string, includeOpenVideoOption: boolean): Promise<YouTubeInputResult | null> {
-    const initialUrl = await this.detectYouTubeUrl();
-    return new Promise((resolve) => {
-      new YouTubeUrlModal(this.app, title, initialUrl, includeOpenVideoOption, resolve).open();
-    });
-  }
-
-  private async detectYouTubeUrl(): Promise<string> {
-    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    const noteText = activeView
-      ? activeView.editor.getSelection().trim() || activeView.getViewData()
-      : "";
-    const noteUrl = extractYouTubeUrl(noteText);
-    if (noteUrl) return noteUrl;
-
-    try {
-      const clipboardUrl = extractYouTubeUrl(await navigator.clipboard.readText());
-      if (clipboardUrl) return clipboardUrl;
-    } catch {
-      // Clipboard access can be denied; the modal still opens empty.
-    }
-
-    return "";
   }
 
   private async getAvailableVaultPath(path: string): Promise<string> {
@@ -1919,229 +1810,6 @@ class TranslationProgressOverlay {
   }
 }
 
-class YouTubePlayerView extends ItemView {
-  private currentTimeTimer?: number;
-  private titleEl?: HTMLElement;
-  private videoId = "";
-  private webview?: HTMLElement & {
-    executeJavaScript?: (code: string, userGesture?: boolean) => Promise<any>;
-    getURL?: () => string;
-    loadURL?: (url: string) => void;
-    src?: string;
-  };
-  private currentTime = 0;
-  private start = 0;
-
-  constructor(leaf: WorkspaceLeaf, private readonly plugin: ContextualAIReaderPlugin) {
-    super(leaf);
-  }
-
-  getViewType(): string {
-    return YOUTUBE_PLAYER_VIEW_TYPE;
-  }
-
-  getDisplayText(): string {
-    return "YouTube Player";
-  }
-
-  getIcon(): string {
-    return "youtube";
-  }
-
-  async onOpen() {
-    this.containerEl.empty();
-    const root = this.containerEl.createDiv("contextual-ai-reader-youtube-player-view");
-    const header = root.createDiv("contextual-ai-reader-youtube-player-header");
-    this.titleEl = header.createDiv("contextual-ai-reader-youtube-player-title");
-    this.titleEl.setText("YouTube Player");
-
-    const screenshotButton = header.createEl("button", {
-      cls: "contextual-ai-reader-youtube-player-button",
-      attr: {
-        "aria-label": "Capture screenshot to current note",
-        title: "Capture screenshot to current note"
-      }
-    });
-    setIcon(screenshotButton, "camera");
-    screenshotButton.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void this.plugin.captureYouTubeScreenshotToNote();
-    });
-
-    const webview = document.createElement("webview") as NonNullable<YouTubePlayerView["webview"]>;
-    webview.className = "contextual-ai-reader-youtube-player-webview";
-    webview.setAttribute("allowpopups", "");
-    webview.setAttribute("webpreferences", "contextIsolation=yes, sandbox=yes");
-    root.appendChild(webview);
-    this.webview = webview;
-
-    webview.addEventListener("dom-ready", () => {
-      void this.seekLoadedVideo(this.start, true);
-      this.startCurrentTimePolling();
-    });
-
-    if (this.videoId) {
-      this.loadVideo();
-    }
-  }
-
-  async onClose() {
-    this.stopCurrentTimePolling();
-  }
-
-  hasVideo(): boolean {
-    return Boolean(this.videoId && this.webview);
-  }
-
-  async captureFramePng(): Promise<YouTubeScreenshot> {
-    if (!this.videoId || !this.webview?.executeJavaScript) {
-      throw new Error("No YouTube video is open.");
-    }
-
-    const result = await this.webview.executeJavaScript(`
-      (() => {
-        const video = document.querySelector('video');
-        if (!video) return { error: 'No video element found on the YouTube page.' };
-        const width = video.videoWidth || Math.round(video.getBoundingClientRect().width);
-        const height = video.videoHeight || Math.round(video.getBoundingClientRect().height);
-        if (!width || !height) return { error: 'Video frame is not ready yet.' };
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d', { alpha: false });
-        if (!ctx) return { error: 'Could not create canvas context.' };
-        ctx.drawImage(video, 0, 0, width, height);
-        return {
-          currentTime: video.currentTime || 0,
-          dataUrl: canvas.toDataURL('image/png')
-        };
-      })();
-    `, true);
-
-    if (result?.error) {
-      throw new Error(String(result.error));
-    }
-
-    const png = dataUrlToBuffer(String(result?.dataUrl ?? ""));
-    const currentTime = Number(result?.currentTime);
-    if (Number.isFinite(currentTime)) {
-      this.currentTime = currentTime;
-    }
-
-    return {
-      png,
-      start: this.getCurrentTimestamp(),
-      videoId: this.videoId
-    };
-  }
-
-  setVideo(videoId: string, start: number) {
-    const normalizedStart = Math.max(0, Math.floor(start));
-    const isSameVideo = this.videoId === videoId;
-    this.videoId = videoId;
-    this.start = normalizedStart;
-    this.currentTime = normalizedStart;
-    this.updateTitle();
-
-    if (!this.webview) return;
-
-    if (isSameVideo && this.isOnYouTubeWatchPage()) {
-      void this.seekLoadedVideo(normalizedStart, true);
-      return;
-    }
-
-    this.loadVideo();
-  }
-
-  private loadVideo() {
-    if (!this.webview || !this.videoId) return;
-    this.stopCurrentTimePolling();
-    const url = this.buildWatchUrl();
-    if (typeof this.webview.loadURL === "function") {
-      this.webview.loadURL(url);
-    } else {
-      this.webview.src = url;
-    }
-  }
-
-  private buildWatchUrl(): string {
-    const params = new URLSearchParams({
-      t: String(this.start),
-      v: this.videoId
-    });
-    return `https://www.youtube.com/watch?${params.toString()}`;
-  }
-
-  private isOnYouTubeWatchPage(): boolean {
-    const currentUrl = this.webview?.getURL?.() ?? this.webview?.src ?? "";
-    return currentUrl.includes("youtube.com/watch") && currentUrl.includes(this.videoId);
-  }
-
-  private async seekLoadedVideo(start: number, play: boolean) {
-    if (!this.webview?.executeJavaScript || !this.videoId) return;
-    const result = await this.webview.executeJavaScript(`
-      (() => {
-        const video = document.querySelector('video');
-        if (!video) return { ok: false, reason: 'No video element found.' };
-        video.currentTime = ${JSON.stringify(start)};
-        ${play ? "video.play?.().catch(() => {});" : ""}
-        return { ok: true, currentTime: video.currentTime || 0 };
-      })();
-    `, true).catch((error: unknown) => ({ ok: false, reason: getErrorMessage(error) }));
-
-    if (result?.ok) {
-      const currentTime = Number(result.currentTime);
-      if (Number.isFinite(currentTime)) {
-        this.currentTime = currentTime;
-      }
-      this.updateTitle();
-      new Notice(`YouTube → ${formatTimestamp(start)}`, 1200);
-    } else if (result?.reason) {
-      new Notice(`Could not seek YouTube video: ${result.reason}`, 4000);
-    }
-  }
-
-  private updateTitle() {
-    if (this.titleEl) {
-      this.titleEl.setText(`YouTube · ${this.videoId || "No video"} · ${formatTimestamp(this.getCurrentTimestamp())}`);
-    }
-  }
-
-  private getCurrentTimestamp(): number {
-    return Math.max(0, Math.floor(this.currentTime || this.start));
-  }
-
-  private startCurrentTimePolling() {
-    this.stopCurrentTimePolling();
-    this.currentTimeTimer = window.setInterval(() => {
-      void this.refreshCurrentTime();
-    }, 1000);
-  }
-
-  private stopCurrentTimePolling() {
-    if (this.currentTimeTimer) {
-      window.clearInterval(this.currentTimeTimer);
-      this.currentTimeTimer = undefined;
-    }
-  }
-
-  private async refreshCurrentTime() {
-    if (!this.webview?.executeJavaScript) return;
-    const value = await this.webview.executeJavaScript(`
-      (() => {
-        const video = document.querySelector('video');
-        return video ? video.currentTime || 0 : null;
-      })();
-    `, false).catch(() => null);
-    const currentTime = Number(value);
-    if (Number.isFinite(currentTime)) {
-      this.currentTime = currentTime;
-      this.updateTitle();
-    }
-  }
-}
-
 class BatchScopeModal extends Modal {
   constructor(
     app: App,
@@ -2206,91 +1874,6 @@ class BatchScopeModal extends Modal {
   }
 }
 
-class YouTubeUrlModal extends Modal {
-  constructor(
-    app: App,
-    private readonly titleText: string,
-    private readonly initialUrl: string,
-    private readonly includeOpenVideoOption: boolean,
-    private readonly onSubmit: (result: YouTubeInputResult | null) => void
-  ) {
-    super(app);
-  }
-
-  onOpen() {
-    this.setTitle(this.titleText);
-    this.contentEl.empty();
-
-    const description = document.createElement("p");
-    description.className = "contextual-ai-reader-batch-description";
-    description.setText("Paste a YouTube URL. The plugin will open the video in an Obsidian tab and can extract public subtitles into a note.");
-    this.contentEl.appendChild(description);
-
-    const input = document.createElement("input");
-    input.type = "text";
-    input.className = "contextual-ai-reader-youtube-url-input";
-    input.placeholder = "https://www.youtube.com/watch?v=...";
-    input.value = this.initialUrl;
-    this.contentEl.appendChild(input);
-
-    let openVideoCheckbox: HTMLInputElement | null = null;
-    if (this.includeOpenVideoOption) {
-      const optionLabel = document.createElement("label");
-      optionLabel.className = "contextual-ai-reader-youtube-option";
-      openVideoCheckbox = document.createElement("input");
-      openVideoCheckbox.type = "checkbox";
-      openVideoCheckbox.checked = true;
-      optionLabel.appendChild(openVideoCheckbox);
-      optionLabel.appendText("Open video tab while extracting");
-      this.contentEl.appendChild(optionLabel);
-    }
-
-    const actions = document.createElement("div");
-    actions.className = "contextual-ai-reader-batch-actions";
-
-    const cancelButton = document.createElement("button");
-    cancelButton.type = "button";
-    cancelButton.setText("Cancel");
-    cancelButton.addEventListener("click", () => {
-      this.close();
-      this.onSubmit(null);
-    });
-
-    const startButton = document.createElement("button");
-    startButton.type = "button";
-    startButton.className = "mod-cta";
-    startButton.setText("Start");
-    startButton.addEventListener("click", () => {
-      const url = input.value.trim();
-      if (!extractYouTubeVideoId(url)) {
-        new Notice("Enter a valid YouTube URL.");
-        return;
-      }
-
-      this.close();
-      this.onSubmit({
-        openVideo: openVideoCheckbox?.checked ?? true,
-        url
-      });
-    });
-
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        startButton.click();
-      }
-    });
-
-    actions.appendChild(cancelButton);
-    actions.appendChild(startButton);
-    this.contentEl.appendChild(actions);
-
-    window.setTimeout(() => {
-      input.focus();
-      input.select();
-    }, 0);
-  }
-}
-
 class ContextualAIReaderSettingTab extends PluginSettingTab {
   plugin: ContextualAIReaderPlugin;
 
@@ -2305,12 +1888,14 @@ class ContextualAIReaderSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("AI backend")
-      .setDesc("Auto uses Codex when available, then falls back to Claude Code. Both run locally with no API key.")
+      .setDesc("Auto uses local Codex when available, then falls back to local Claude Code. API modes use the token configured below.")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("auto", "Auto (Codex if available)")
           .addOption("codex", "Codex (ChatGPT plan)")
           .addOption("claude", "Claude Code (Claude plan)")
+          .addOption("openai", "OpenAI API token")
+          .addOption("anthropic", "Anthropic API token")
           .setValue(this.plugin.settings.aiBackend)
           .onChange(async (value) => {
             this.plugin.settings.aiBackend = value as AIBackend;
@@ -2319,7 +1904,7 @@ class ContextualAIReaderSettingTab extends PluginSettingTab {
           })
       );
 
-    if (this.plugin.settings.aiBackend !== "codex") {
+    if (this.plugin.settings.aiBackend === "auto" || this.plugin.settings.aiBackend === "claude") {
       new Setting(containerEl)
         .setName("Claude command")
         .setDesc("Used by Claude or Auto mode. Leave empty to auto-detect the Claude Code CLI.")
@@ -2342,6 +1927,90 @@ class ContextualAIReaderSettingTab extends PluginSettingTab {
             .setValue(this.plugin.settings.claudeModel)
             .onChange(async (value) => {
               this.plugin.settings.claudeModel = value.trim() || DEFAULT_SETTINGS.claudeModel;
+              await this.plugin.saveSettings();
+            })
+        );
+    }
+
+    if (this.plugin.settings.aiBackend === "openai") {
+      new Setting(containerEl)
+        .setName("OpenAI API key")
+        .setDesc("Stored in this plugin's local Obsidian settings. Required only for OpenAI API mode.")
+        .addText((text) => {
+          text.inputEl.type = "password";
+          text
+            .setPlaceholder("sk-...")
+            .setValue(this.plugin.settings.openaiApiKey)
+            .onChange(async (value) => {
+              this.plugin.settings.openaiApiKey = value.trim();
+              await this.plugin.saveSettings();
+            });
+        });
+
+      new Setting(containerEl)
+        .setName("OpenAI model")
+        .setDesc("Used by OpenAI API mode.")
+        .addText((text) =>
+          text
+            .setPlaceholder("gpt-4.1-mini")
+            .setValue(this.plugin.settings.openaiModel)
+            .onChange(async (value) => {
+              this.plugin.settings.openaiModel = value.trim() || DEFAULT_SETTINGS.openaiModel;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(containerEl)
+        .setName("OpenAI base URL")
+        .setDesc("Keep the default for OpenAI, or set an OpenAI-compatible endpoint.")
+        .addText((text) =>
+          text
+            .setPlaceholder("https://api.openai.com/v1")
+            .setValue(this.plugin.settings.openaiBaseUrl)
+            .onChange(async (value) => {
+              this.plugin.settings.openaiBaseUrl = value.trim() || DEFAULT_SETTINGS.openaiBaseUrl;
+              await this.plugin.saveSettings();
+            })
+        );
+    }
+
+    if (this.plugin.settings.aiBackend === "anthropic") {
+      new Setting(containerEl)
+        .setName("Anthropic API key")
+        .setDesc("Stored in this plugin's local Obsidian settings. Required only for Anthropic API mode.")
+        .addText((text) => {
+          text.inputEl.type = "password";
+          text
+            .setPlaceholder("sk-ant-...")
+            .setValue(this.plugin.settings.anthropicApiKey)
+            .onChange(async (value) => {
+              this.plugin.settings.anthropicApiKey = value.trim();
+              await this.plugin.saveSettings();
+            });
+        });
+
+      new Setting(containerEl)
+        .setName("Anthropic model")
+        .setDesc("Used by Anthropic API mode.")
+        .addText((text) =>
+          text
+            .setPlaceholder("claude-sonnet-4-5")
+            .setValue(this.plugin.settings.anthropicModel)
+            .onChange(async (value) => {
+              this.plugin.settings.anthropicModel = value.trim() || DEFAULT_SETTINGS.anthropicModel;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(containerEl)
+        .setName("Anthropic base URL")
+        .setDesc("Keep the default unless you use a compatible proxy.")
+        .addText((text) =>
+          text
+            .setPlaceholder("https://api.anthropic.com/v1")
+            .setValue(this.plugin.settings.anthropicBaseUrl)
+            .onChange(async (value) => {
+              this.plugin.settings.anthropicBaseUrl = value.trim() || DEFAULT_SETTINGS.anthropicBaseUrl;
               await this.plugin.saveSettings();
             })
         );
@@ -2371,7 +2040,7 @@ class ContextualAIReaderSettingTab extends PluginSettingTab {
           })
       );
 
-    if (this.plugin.settings.aiBackend !== "claude") {
+    if (this.plugin.settings.aiBackend === "auto" || this.plugin.settings.aiBackend === "codex") {
       new Setting(containerEl)
         .setName("Codex command")
         .setDesc("Used by Codex or Auto fallback. Leave empty to auto-detect Codex.app or the local Codex CLI.")
@@ -2424,32 +2093,6 @@ class ContextualAIReaderSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.excerptFilePath)
           .onChange(async (value) => {
             this.plugin.settings.excerptFilePath = value.trim() || DEFAULT_SETTINGS.excerptFilePath;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("YouTube transcript folder")
-      .setDesc("Vault folder where extracted YouTube subtitle notes are saved.")
-      .addText((text) =>
-        text
-          .setPlaceholder("YouTube Transcripts")
-          .setValue(this.plugin.settings.youtubeTranscriptFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.youtubeTranscriptFolder = value.trim() || DEFAULT_SETTINGS.youtubeTranscriptFolder;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("YouTube screenshot folder")
-      .setDesc("Vault folder where captured YouTube screenshots are saved.")
-      .addText((text) =>
-        text
-          .setPlaceholder("YouTube Screenshots")
-          .setValue(this.plugin.settings.youtubeScreenshotFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.youtubeScreenshotFolder = value.trim() || DEFAULT_SETTINGS.youtubeScreenshotFolder;
             await this.plugin.saveSettings();
           })
       );
@@ -2539,7 +2182,7 @@ class ContextualAIReaderSettingTab extends PluginSettingTab {
           })
       );
 
-    if (this.plugin.settings.aiBackend !== "claude") {
+    if (this.plugin.settings.aiBackend === "auto" || this.plugin.settings.aiBackend === "codex") {
       new Setting(containerEl)
         .setName("Reasoning effort")
         .setDesc("Used by Codex or Auto fallback. Use none for translation unless you need heavier reasoning.")
@@ -3134,6 +2777,27 @@ function hasClaudeCommand(configuredCommand: string): boolean {
   return CLAUDE_CANDIDATES.some((candidate) => candidate !== "claude" && existsSync(candidate));
 }
 
+function normalizeApiBaseUrl(value: string, fallback: string): string {
+  return (value.trim() || fallback).replace(/\/+$/, "");
+}
+
+function normalizeAITextContent(
+  content: string | Array<{ text?: string; type?: string }> | undefined
+): string {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => part.text ?? "")
+      .join("")
+      .trim();
+  }
+
+  return "";
+}
+
 interface ProcessResult {
   code: number | null;
   stdout: string;
@@ -3434,563 +3098,6 @@ function cleanSpeechText(text: string): string {
     .trim();
 }
 
-function extractYouTubeVideoId(text: string): string | null {
-  const urlMatch = extractYouTubeUrl(text);
-  const raw = urlMatch ?? text.trim();
-
-  try {
-    const url = new URL(raw);
-    const host = url.hostname.replace(/^www\./, "");
-
-    if (host === "youtu.be") {
-      return normalizeYouTubeVideoId(url.pathname.split("/").filter(Boolean)[0] ?? "");
-    }
-
-    if (host.endsWith("youtube.com")) {
-      const byQuery = normalizeYouTubeVideoId(url.searchParams.get("v") ?? "");
-      if (byQuery) return byQuery;
-
-      const parts = url.pathname.split("/").filter(Boolean);
-      const markerIndex = parts.findIndex((part) => ["embed", "shorts", "live"].includes(part));
-      if (markerIndex >= 0) {
-        return normalizeYouTubeVideoId(parts[markerIndex + 1] ?? "");
-      }
-    }
-  } catch {
-    const looseMatch = raw.match(/(?:v=|youtu\.be\/|embed\/|shorts\/|live\/)([A-Za-z0-9_-]{11})/);
-    return normalizeYouTubeVideoId(looseMatch?.[1] ?? "");
-  }
-
-  return null;
-}
-
-function extractYouTubeUrl(text: string): string | null {
-  return text.match(/https?:\/\/(?:www\.)?(?:(?:m\.|mobile\.|music\.)?youtube\.com|youtube-nocookie\.com|youtu\.be)\/[^\s<>)"']+/i)?.[0] ?? null;
-}
-
-function normalizeYouTubeVideoId(value: string): string | null {
-  const match = value.match(/^[A-Za-z0-9_-]{11}$/);
-  return match ? value : null;
-}
-
-async function fetchYouTubeTranscript(videoId: string): Promise<YouTubeTranscript> {
-  const playerResponse = await fetchYouTubePlayerData(videoId);
-  const title = String(playerResponse?.videoDetails?.title ?? videoId);
-  const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-
-  if (!Array.isArray(tracks) || tracks.length === 0) {
-    throw new Error("This video does not expose public subtitles.");
-  }
-
-  const track = chooseCaptionTrack(tracks);
-  const baseUrl = String(track?.baseUrl ?? "");
-
-  if (!baseUrl) {
-    throw new Error("Subtitle track has no downloadable URL.");
-  }
-
-  return {
-    entries: await fetchAndParseYouTubeCaptionTrack(baseUrl),
-    title,
-    videoId
-  };
-}
-
-async function fetchYouTubePlayerData(videoId: string): Promise<any> {
-  const responseText = await requestText({
-    body: JSON.stringify({
-      context: INNERTUBE_IOS_CONTEXT,
-      videoId
-    }),
-    headers: {
-      "Content-Type": "application/json",
-      "User-Agent": INNERTUBE_IOS_USER_AGENT
-    },
-    method: "POST",
-    url: INNERTUBE_PLAYER_URL
-  });
-  const data = JSON.parse(responseText);
-  const status = data.playabilityStatus;
-
-  if (status?.status === "LOGIN_REQUIRED") {
-    throw new Error("This video requires login to view.");
-  }
-
-  if (status?.status === "ERROR" || status?.status === "UNPLAYABLE") {
-    throw new Error(status.reason || "This video is not playable.");
-  }
-
-  return data;
-}
-
-async function fetchAndParseYouTubeCaptionTrack(baseUrl: string): Promise<YouTubeTranscriptEntry[]> {
-  const urls = [
-    baseUrl,
-    withYouTubeCaptionFormat(baseUrl, "srv3"),
-    withYouTubeCaptionFormat(baseUrl, "json3"),
-    withYouTubeCaptionFormat(baseUrl, "vtt")
-  ];
-  const failures: string[] = [];
-
-  for (const url of urls) {
-    try {
-      const rawText = await requestText({
-        headers: {
-          "Accept-Language": "en-US,en;q=0.9",
-          "User-Agent": INNERTUBE_IOS_USER_AGENT
-        },
-        method: "GET",
-        url
-      });
-      const entries = parseYouTubeTranscript(rawText);
-
-      if (entries.length > 0) {
-        return entries;
-      }
-
-      failures.push("empty subtitle response");
-    } catch (error) {
-      failures.push(getErrorMessage(error));
-    }
-  }
-
-  throw new Error(`Could not parse YouTube subtitle data after trying ${urls.length} formats. Last error: ${failures.at(-1) ?? "unknown"}`);
-}
-
-function chooseCaptionTrack(tracks: any[]): any {
-  return tracks.find((track) => String(track.languageCode ?? "").toLowerCase().startsWith("en") && !track.kind)
-    ?? tracks.find((track) => String(track.languageCode ?? "").toLowerCase().startsWith("en"))
-    ?? tracks.find((track) => !track.kind)
-    ?? tracks[0];
-}
-
-function withYouTubeCaptionFormat(baseUrl: string, format: string): string {
-  const url = new URL(baseUrl);
-  url.searchParams.set("fmt", format);
-  return url.toString();
-}
-
-async function requestText(request: {
-  body?: string;
-  headers?: Record<string, string>;
-  method: "GET" | "POST";
-  url: string;
-}): Promise<string> {
-  if (typeof requestUrl === "function") {
-    const response = await requestUrl({
-      body: request.body,
-      headers: request.headers,
-      method: request.method,
-      url: request.url
-    });
-    return response.text;
-  }
-
-  return requestTextWithNode(request);
-}
-
-function requestTextWithNode(request: {
-  body?: string;
-  headers?: Record<string, string>;
-  method: "GET" | "POST";
-  url: string;
-}, redirectCount = 0): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const url = new URL(request.url);
-    const req = httpsRequest({
-      headers: request.headers,
-      hostname: url.hostname,
-      method: request.method,
-      path: `${url.pathname}${url.search}`,
-      port: url.port ? Number(url.port) : 443,
-      protocol: url.protocol
-    }, (response) => {
-      const statusCode = response.statusCode ?? 0;
-      const location = response.headers.location;
-
-      if (statusCode >= 300 && statusCode < 400 && location) {
-        response.resume();
-        if (redirectCount >= 5) {
-          reject(new Error("Too many redirects while fetching YouTube subtitles."));
-          return;
-        }
-
-        requestTextWithNode({
-          ...request,
-          url: new URL(location, request.url).toString()
-        }, redirectCount + 1).then(resolve, reject);
-        return;
-      }
-
-      if (statusCode < 200 || statusCode >= 300) {
-        response.resume();
-        reject(new Error(`HTTP ${statusCode} while fetching YouTube subtitles.`));
-        return;
-      }
-
-      response.setEncoding("utf8");
-      let body = "";
-      response.on("data", (chunk) => { body += chunk; });
-      response.on("end", () => resolve(body));
-    });
-
-    req.on("error", reject);
-    req.setTimeout(20_000, () => {
-      req.destroy(new Error("Timed out while fetching YouTube subtitles."));
-    });
-
-    if (request.body) {
-      req.write(request.body);
-    }
-    req.end();
-  });
-}
-
-function parseYouTubeTranscript(rawText: string): YouTubeTranscriptEntry[] {
-  const trimmed = rawText.trim().replace(/^\)\]\}'\s*/, "");
-
-  if (trimmed.startsWith("{")) {
-    const jsonEntries = parseYouTubeTranscriptJson(trimmed);
-    if (jsonEntries.length > 0) {
-      return jsonEntries;
-    }
-  }
-
-  if (trimmed.startsWith("<")) {
-    const xmlEntries = parseYouTubeTranscriptXml(trimmed);
-    if (xmlEntries.length > 0) {
-      return xmlEntries;
-    }
-  }
-
-  if (/^WEBVTT/i.test(trimmed)) {
-    const vttEntries = parseYouTubeTranscriptVtt(trimmed);
-    if (vttEntries.length > 0) {
-      return vttEntries;
-    }
-  }
-
-  const plainEntries = parseLooseSubtitleText(trimmed);
-  if (plainEntries.length > 0) {
-    return plainEntries;
-  }
-
-  throw new Error(`Could not parse YouTube subtitle data. Received: ${trimmed.slice(0, 120)}`);
-}
-
-function parseYouTubeTranscriptJson(jsonText: string): YouTubeTranscriptEntry[] {
-  const data = JSON.parse(jsonText) as {
-    events?: Array<{
-      dDurationMs?: number;
-      segs?: Array<{ utf8?: string }>;
-      tStartMs?: number;
-    }>;
-  };
-
-  return (data.events ?? [])
-    .map((event) => ({
-      duration: (event.dDurationMs ?? 0) / 1000,
-      start: (event.tStartMs ?? 0) / 1000,
-      text: normalizeWhitespace(decodeHtmlEntities((event.segs ?? []).map((seg) => seg.utf8 ?? "").join("")))
-    }))
-    .filter((entry) => entry.text);
-}
-
-function parseYouTubeTranscriptXml(xml: string): YouTubeTranscriptEntry[] {
-  const doc = new DOMParser().parseFromString(xml, "text/xml");
-  const parseError = doc.querySelector("parsererror");
-
-  if (parseError) {
-    return [];
-  }
-
-  const textEntries = Array.from(doc.querySelectorAll("text"))
-    .map((node) => ({
-      duration: Number.parseFloat(node.getAttribute("dur") ?? "0"),
-      start: Number.parseFloat(node.getAttribute("start") ?? "0"),
-      text: normalizeWhitespace(decodeHtmlEntities(node.textContent ?? ""))
-    }))
-    .filter((entry) => entry.text);
-
-  if (textEntries.length > 0) {
-    return textEntries;
-  }
-
-  return Array.from(doc.querySelectorAll("p"))
-    .map((node) => ({
-      duration: Number.parseFloat(node.getAttribute("d") ?? "0") / 1000,
-      start: Number.parseFloat(node.getAttribute("t") ?? "0") / 1000,
-      text: normalizeWhitespace(decodeHtmlEntities(node.textContent ?? ""))
-    }))
-    .filter((entry) => entry.text);
-}
-
-function parseYouTubeTranscriptVtt(vtt: string): YouTubeTranscriptEntry[] {
-  const entries: YouTubeTranscriptEntry[] = [];
-  const blocks = vtt
-    .replace(/\r/g, "")
-    .split(/\n{2,}/)
-    .map((block) => block.trim())
-    .filter(Boolean);
-
-  for (const block of blocks) {
-    const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
-    const timingLine = lines.find((line) => line.includes("-->"));
-    if (!timingLine) continue;
-
-    const timingIndex = lines.indexOf(timingLine);
-    const [startRaw, endRaw] = timingLine.split("-->").map((part) => part.trim().split(/\s+/)[0]);
-    const start = parseVttTimestamp(startRaw);
-    const end = parseVttTimestamp(endRaw);
-    const text = normalizeWhitespace(decodeHtmlEntities(lines.slice(timingIndex + 1).join(" ").replace(/<[^>]+>/g, "")));
-
-    if (text) {
-      entries.push({
-        duration: Math.max(0, end - start),
-        start,
-        text
-      });
-    }
-  }
-
-  return entries;
-}
-
-function parseLooseSubtitleText(text: string): YouTubeTranscriptEntry[] {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => normalizeWhitespace(decodeHtmlEntities(line.replace(/<[^>]+>/g, ""))))
-    .filter(Boolean)
-    .filter((line) => !/^(WEBVTT|Kind:|Language:)/i.test(line));
-
-  return lines.map((line, index) => ({
-    duration: 0,
-    start: index,
-    text: line
-  }));
-}
-
-function parseVttTimestamp(value: string): number {
-  const parts = value.split(":").map((part) => Number.parseFloat(part.replace(",", ".")));
-  if (parts.some((part) => !Number.isFinite(part))) return 0;
-
-  if (parts.length === 3) {
-    return parts[0] * 3600 + parts[1] * 60 + parts[2];
-  }
-
-  if (parts.length === 2) {
-    return parts[0] * 60 + parts[1];
-  }
-
-  return parts[0] ?? 0;
-}
-
-function formatYouTubeTranscriptNote(transcript: YouTubeTranscript): string {
-  const sourceUrl = `https://www.youtube.com/watch?v=${transcript.videoId}`;
-  const blocks = groupYouTubeTranscriptEntries(transcript.entries);
-  const lines = [
-    `# ${transcript.title}`,
-    "",
-    `Source: ${sourceUrl}`,
-    `Blocks: ${blocks.length} · Caption lines: ${transcript.entries.length}`,
-    "",
-    "## Transcript",
-    ""
-  ];
-
-  for (const block of blocks) {
-    const timestamp = formatTimestamp(block.start);
-    const seekUrl = buildYouTubeInternalSeekLink(transcript.videoId, block.start);
-    lines.push(`- [${timestamp}](${seekUrl}) ${block.text}`);
-  }
-
-  return `${lines.join("\n")}\n`;
-}
-
-function groupYouTubeTranscriptEntries(entries: YouTubeTranscriptEntry[]): YouTubeTranscriptEntry[] {
-  const blocks: YouTubeTranscriptEntry[] = [];
-  let currentStart = 0;
-  let currentDuration = 0;
-  let currentTexts: string[] = [];
-  let currentLines = 0;
-
-  const flush = () => {
-    const text = normalizeTranscriptBlockText(currentTexts);
-    if (text) {
-      blocks.push({
-        duration: currentDuration,
-        start: currentStart,
-        text
-      });
-    }
-    currentStart = 0;
-    currentDuration = 0;
-    currentTexts = [];
-    currentLines = 0;
-  };
-
-  for (const entry of entries) {
-    const text = normalizeWhitespace(decodeHtmlEntities(entry.text));
-    if (!text) continue;
-
-    if (currentLines === 0) {
-      currentStart = entry.start;
-    }
-
-    currentTexts.push(text);
-    currentLines += 1;
-    currentDuration = Math.max(currentDuration, (entry.start + entry.duration) - currentStart);
-
-    const blockText = normalizeTranscriptBlockText(currentTexts);
-    const hasNaturalEnding = /(?:[.!?。！？]|[.!?]["'”’)\]]+)$/.test(blockText);
-    const isNaturalSentenceBlock = hasNaturalEnding
-      && currentLines >= YOUTUBE_TRANSCRIPT_MIN_LINES_PER_BLOCK
-      && blockText.length >= YOUTUBE_TRANSCRIPT_MIN_CHARS_PER_BLOCK;
-    const isTooLarge = currentLines >= YOUTUBE_TRANSCRIPT_MAX_LINES_PER_BLOCK
-      || blockText.length >= YOUTUBE_TRANSCRIPT_MAX_CHARS_PER_BLOCK
-      || currentDuration >= YOUTUBE_TRANSCRIPT_MAX_SECONDS_PER_BLOCK;
-
-    if (isNaturalSentenceBlock || isTooLarge) {
-      flush();
-    }
-  }
-
-  if (currentLines > 0) {
-    flush();
-  }
-
-  return blocks;
-}
-
-function normalizeTranscriptBlockText(parts: string[]): string {
-  return normalizeWhitespace(parts.join(" "))
-    .replace(/\s+([,.;:!?])/g, "$1")
-    .replace(/\s+([’'])\s*/g, "$1")
-    .trim();
-}
-
-function decodeHtmlEntities(text: string): string {
-  const named: Record<string, string> = {
-    amp: "&",
-    apos: "'",
-    gt: ">",
-    lt: "<",
-    nbsp: " ",
-    quot: "\""
-  };
-
-  return text
-    .replace(/&#(\d+);/g, (_, value: string) => {
-      const codePoint = Number.parseInt(value, 10);
-      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : _;
-    })
-    .replace(/&#x([0-9a-f]+);/gi, (_, value: string) => {
-      const codePoint = Number.parseInt(value, 16);
-      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : _;
-    })
-    .replace(/&([a-z]+);/gi, (match, name: string) => named[name.toLowerCase()] ?? match);
-}
-
-function buildYouTubeInternalSeekLink(videoId: string, start: number): string {
-  const params = new URLSearchParams({
-    v: videoId,
-    t: String(Math.max(0, Math.floor(start)))
-  });
-  return `#${YOUTUBE_INTERNAL_LINK_HASH}?${params.toString()}`;
-}
-
-function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
-  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
-}
-
-function dataUrlToBuffer(dataUrl: string): Buffer {
-  const match = dataUrl.match(/^data:image\/png;base64,(.+)$/);
-  if (!match) {
-    throw new Error("YouTube did not return a PNG screenshot.");
-  }
-
-  const buffer = Buffer.from(match[1], "base64");
-  if (buffer.length === 0) {
-    throw new Error("YouTube returned an empty screenshot.");
-  }
-  return buffer;
-}
-
-function parseYouTubeInternalLink(href: string): { start: number; videoId: string } | null {
-  const hashTarget = parseYouTubeHashLink(href);
-  if (hashTarget) {
-    return hashTarget;
-  }
-
-  try {
-    const url = new URL(href);
-    if (url.protocol !== "codex-youtube:") {
-      return null;
-    }
-
-    const videoId = normalizeYouTubeVideoId(url.searchParams.get("v") ?? "")
-      ?? normalizeYouTubeVideoId(url.pathname.replace(/^\/+/, ""))
-      ?? normalizeYouTubeVideoId(url.hostname);
-    if (!videoId) {
-      return null;
-    }
-
-    return {
-      start: Number.parseInt(url.searchParams.get("t") ?? "0", 10) || 0,
-      videoId
-    };
-  } catch {
-    return null;
-  }
-}
-
-function parseYouTubeHashLink(href: string): { start: number; videoId: string } | null {
-  const hashIndex = href.indexOf(`#${YOUTUBE_INTERNAL_LINK_HASH}`);
-  if (hashIndex < 0) {
-    return null;
-  }
-
-  const rawHash = href.slice(hashIndex + 1);
-  const queryIndex = rawHash.indexOf("?");
-  if (queryIndex < 0 || rawHash.slice(0, queryIndex) !== YOUTUBE_INTERNAL_LINK_HASH) {
-    return null;
-  }
-
-  const params = new URLSearchParams(rawHash.slice(queryIndex + 1));
-  const videoId = normalizeYouTubeVideoId(params.get("v") ?? "");
-  if (!videoId) {
-    return null;
-  }
-
-  return {
-    start: Number.parseInt(params.get("t") ?? "0", 10) || 0,
-    videoId
-  };
-}
-
-function formatTimestamp(seconds: number): string {
-  const totalSeconds = Math.max(0, Math.floor(seconds));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const secs = totalSeconds % 60;
-  const mm = String(minutes).padStart(2, "0");
-  const ss = String(secs).padStart(2, "0");
-
-  if (hours > 0) {
-    return `${hours}:${mm}:${ss}`;
-  }
-
-  return `${minutes}:${ss}`;
-}
-
-function sanitizeFileName(value: string): string {
-  return value
-    .replace(/[\\/:*?"<>|#^[\]]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 120) || "YouTube Transcript";
-}
-
 async function getPreferredVoice(language: string): Promise<SpeechSynthesisVoice | null> {
   const voices = await getSpeechVoices();
   const preferredLanguage = language.toLowerCase();
@@ -4141,33 +3248,6 @@ function eventTargetInside(event: Event, element: HTMLElement): boolean {
 
   const target = event.target;
   return target instanceof Node && element.contains(target);
-}
-
-function getClosestAnchor(target: EventTarget | null): HTMLAnchorElement | null {
-  if (!(target instanceof Element)) {
-    return null;
-  }
-
-  return target.closest("a");
-}
-
-function getYouTubeTimestampTarget(target: EventTarget | null): { start: number; videoId: string } | null {
-  if (!(target instanceof Element)) {
-    return null;
-  }
-
-  const timestampButton = target.closest<HTMLElement>("[data-video-id][data-start]");
-  if (timestampButton?.dataset.videoId) {
-    const videoId = normalizeYouTubeVideoId(timestampButton.dataset.videoId);
-    if (videoId) {
-      return {
-        start: Number.parseInt(timestampButton.dataset.start ?? "0", 10) || 0,
-        videoId
-      };
-    }
-  }
-
-  return parseYouTubeInternalLink(getClosestAnchor(target)?.getAttribute("href") ?? "");
 }
 
 function getSelectionElement(node: Node | null): Element | null {
