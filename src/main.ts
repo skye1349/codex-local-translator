@@ -3213,7 +3213,7 @@ function withYouTubeCaptionFormat(baseUrl: string, format: string): string {
 }
 
 function parseYouTubeTranscript(rawText: string): YouTubeTranscriptEntry[] {
-  const trimmed = rawText.trim();
+  const trimmed = rawText.trim().replace(/^\)\]\}'\s*/, "");
 
   if (trimmed.startsWith("{")) {
     const jsonEntries = parseYouTubeTranscriptJson(trimmed);
@@ -3229,7 +3229,19 @@ function parseYouTubeTranscript(rawText: string): YouTubeTranscriptEntry[] {
     }
   }
 
-  throw new Error("Could not parse YouTube subtitle data.");
+  if (/^WEBVTT/i.test(trimmed)) {
+    const vttEntries = parseYouTubeTranscriptVtt(trimmed);
+    if (vttEntries.length > 0) {
+      return vttEntries;
+    }
+  }
+
+  const plainEntries = parseLooseSubtitleText(trimmed);
+  if (plainEntries.length > 0) {
+    return plainEntries;
+  }
+
+  throw new Error(`Could not parse YouTube subtitle data. Received: ${trimmed.slice(0, 120)}`);
 }
 
 function parseYouTubeTranscriptJson(jsonText: string): YouTubeTranscriptEntry[] {
@@ -3258,13 +3270,85 @@ function parseYouTubeTranscriptXml(xml: string): YouTubeTranscriptEntry[] {
     return [];
   }
 
-  return Array.from(doc.querySelectorAll("text"))
+  const textEntries = Array.from(doc.querySelectorAll("text"))
     .map((node) => ({
       duration: Number.parseFloat(node.getAttribute("dur") ?? "0"),
       start: Number.parseFloat(node.getAttribute("start") ?? "0"),
       text: normalizeWhitespace(node.textContent ?? "")
     }))
     .filter((entry) => entry.text);
+
+  if (textEntries.length > 0) {
+    return textEntries;
+  }
+
+  return Array.from(doc.querySelectorAll("p"))
+    .map((node) => ({
+      duration: Number.parseFloat(node.getAttribute("d") ?? "0") / 1000,
+      start: Number.parseFloat(node.getAttribute("t") ?? "0") / 1000,
+      text: normalizeWhitespace(node.textContent ?? "")
+    }))
+    .filter((entry) => entry.text);
+}
+
+function parseYouTubeTranscriptVtt(vtt: string): YouTubeTranscriptEntry[] {
+  const entries: YouTubeTranscriptEntry[] = [];
+  const blocks = vtt
+    .replace(/\r/g, "")
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  for (const block of blocks) {
+    const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
+    const timingLine = lines.find((line) => line.includes("-->"));
+    if (!timingLine) continue;
+
+    const timingIndex = lines.indexOf(timingLine);
+    const [startRaw, endRaw] = timingLine.split("-->").map((part) => part.trim().split(/\s+/)[0]);
+    const start = parseVttTimestamp(startRaw);
+    const end = parseVttTimestamp(endRaw);
+    const text = normalizeWhitespace(lines.slice(timingIndex + 1).join(" ").replace(/<[^>]+>/g, ""));
+
+    if (text) {
+      entries.push({
+        duration: Math.max(0, end - start),
+        start,
+        text
+      });
+    }
+  }
+
+  return entries;
+}
+
+function parseLooseSubtitleText(text: string): YouTubeTranscriptEntry[] {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => normalizeWhitespace(line.replace(/<[^>]+>/g, "")))
+    .filter(Boolean)
+    .filter((line) => !/^(WEBVTT|Kind:|Language:)/i.test(line));
+
+  return lines.map((line, index) => ({
+    duration: 0,
+    start: index,
+    text: line
+  }));
+}
+
+function parseVttTimestamp(value: string): number {
+  const parts = value.split(":").map((part) => Number.parseFloat(part.replace(",", ".")));
+  if (parts.some((part) => !Number.isFinite(part))) return 0;
+
+  if (parts.length === 3) {
+    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  }
+
+  if (parts.length === 2) {
+    return parts[0] * 60 + parts[1];
+  }
+
+  return parts[0] ?? 0;
 }
 
 function formatYouTubeTranscriptNote(transcript: YouTubeTranscript): string {
