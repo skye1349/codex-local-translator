@@ -122,6 +122,13 @@ interface MarkdownBlock {
   text: string;
 }
 
+interface MarkdownBlockBatch {
+  blocks: MarkdownBlock[];
+  charCount: number;
+  endBlock: number;
+  startBlock: number;
+}
+
 interface ClaudeJsonResult {
   result: string;
   usage?: {
@@ -585,7 +592,7 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     } catch (error) {
       window.clearInterval(timerInterval);
       overlay.remove();
-      new Notice(`Translation failed: ${getErrorMessage(error)}`);
+      new Notice(isStoppedError(error) ? "Translation stopped. Running AI process was killed." : `Translation failed: ${getErrorMessage(error)}`);
       console.error("Translation failed", error);
     } finally {
       this.setStatus("");
@@ -625,10 +632,6 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     try {
       const translatedContent = await this.translateMarkdownDocument(sourceText, overlay, "current file");
 
-      if (this.isCancelled) {
-        throw new Error("Translation stopped.");
-      }
-
       if (!translatedContent.fullText.trim()) {
         throw new Error("AI returned an empty translation.");
       }
@@ -657,7 +660,9 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
         ? "Chinese translation appended below the current file."
         : "Chinese translation inserted after each paragraph."}${this.tokenUsageSuffix()}`, 12000);
     } catch (error) {
-      new Notice(`Translation failed: ${getErrorMessage(error)}`);
+      new Notice(isStoppedError(error)
+        ? `Translation stopped. Running AI process was killed.${this.tokenUsageSuffix()}`
+        : `Translation failed: ${getErrorMessage(error)}`);
       console.error("File translation failed", error);
     } finally {
       window.clearInterval(timerInterval);
@@ -709,8 +714,6 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
 
         const translatedContent = await this.translateMarkdownDocument(sourceText, overlay, fileLabel);
 
-        if (this.isCancelled) break;
-
         if (!translatedContent.fullText.trim()) {
           throw new Error(`${backendLabel} returned an empty translation.`);
         }
@@ -736,7 +739,7 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
 
     const stopped = this.isCancelled;
     const summary = stopped
-      ? `Batch translation stopped: ${changedCount}/${files.length} files updated.`
+      ? `Batch translation stopped: ${changedCount}/${files.length} files updated. Running AI process was killed.`
       : failures.length === 0
         ? `Batch translation complete: ${changedCount}/${files.length} files updated.`
         : `Batch translation finished: ${changedCount}/${files.length} files updated, ${failures.length} failed.`;
@@ -1022,6 +1025,10 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     }
 
     const totalChars = blocks.reduce((sum, b) => sum + b.text.length, 0);
+    overlay.setDetail([
+      `${blocks.length} paragraphs · ${formatCharacterCount(totalChars)} characters`,
+      previewBlockText(blocks[0]?.text ?? "")
+    ].filter(Boolean).join("\n\n"));
     const useSingleShot = totalChars <= this.settings.singleShotMaxChars;
 
     let translations: string[];
@@ -1029,23 +1036,32 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
     if (useSingleShot) {
       // Small file: single AI call
       const onChunk = (chunk: string) => overlay.appendChunk(chunk);
-      overlay.setStatus(`${progressLabel} · translating ${blocks.length} paragraphs...`);
-      this.setStatus(`${backendLabel} translating...`);
+      overlay.setStatus(`${progressLabel} · 0/${blocks.length} paragraphs · single request`);
+      this.setStatus(`${backendLabel} ${progressLabel} 0/${blocks.length}`);
       translations = await this.translateBlockBatch(blocks.map((b) => b.text), onChunk);
+      if (this.isCancelled) throw new Error("Translation stopped.");
+      overlay.setStatus(`${progressLabel} · ${blocks.length}/${blocks.length} paragraphs · inserting`);
     } else {
       // Large file: parallel AI batches (3 concurrent)
       const batches = buildBlockBatches(blocks, this.settings.batchChunkChars);
       const results = new Array<string[]>(batches.length);
       let completed = 0;
+      let completedParagraphs = 0;
       const CONCURRENCY = 3;
 
       let inFlight = 0;
-      const updateStatus = () => {
+      const updateStatus = (activeBatch?: MarkdownBlockBatch) => {
         const label = inFlight > 0
-          ? `${progressLabel} · ${completed}/${batches.length} done, ${inFlight} running`
-          : `${progressLabel} · ${completed}/${batches.length} done`;
+          ? `${progressLabel} · batch ${completed}/${batches.length} done · ${completedParagraphs}/${blocks.length} paragraphs · ${inFlight} running`
+          : `${progressLabel} · batch ${completed}/${batches.length} done · ${completedParagraphs}/${blocks.length} paragraphs`;
         overlay.setStatus(label);
-        this.setStatus(`${backendLabel} ${completed}/${batches.length}`);
+        if (activeBatch) {
+          overlay.setDetail([
+            `Current batch: paragraphs ${activeBatch.startBlock + 1}-${activeBatch.endBlock} · ${formatCharacterCount(activeBatch.charCount)} chars`,
+            previewBlockText(activeBatch.blocks[0]?.text ?? "")
+          ].filter(Boolean).join("\n\n"));
+        }
+        this.setStatus(`${backendLabel} ${completed}/${batches.length} batches · ${completedParagraphs}/${blocks.length} paragraphs`);
       };
 
       const queue = batches.map((batch, i) => ({ batch, i }));
@@ -1054,15 +1070,17 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
           const item = queue.shift();
           if (!item) break;
           inFlight++;
-          updateStatus();
-          results[item.i] = await this.translateBlockBatch(item.batch.map((b) => b.text));
+          updateStatus(item.batch);
+          results[item.i] = await this.translateBlockBatch(item.batch.blocks.map((b) => b.text));
           inFlight--;
           completed++;
-          updateStatus();
+          completedParagraphs += item.batch.blocks.length;
+          updateStatus(item.batch);
         }
       });
 
       await Promise.all(workers);
+      if (this.isCancelled) throw new Error("Translation stopped.");
       translations = results.filter(Boolean).flat();
     }
 
@@ -1074,12 +1092,17 @@ export default class CodexLocalTranslatorPlugin extends Plugin {
   }
 
   private async translateBlockBatch(blockTexts: string[], onChunk?: (chunk: string) => void): Promise<string[]> {
+    if (this.isCancelled) throw new Error("Translation stopped.");
+
     const prompt = buildBlockTranslationPrompt(blockTexts, this.settings.customPrompt);
     const rawResult = await this.runAIPrompt(prompt, onChunk);
+
+    if (this.isCancelled) throw new Error("Translation stopped.");
 
     try {
       return parseTranslationArray(rawResult, blockTexts.length);
     } catch (error) {
+      if (this.isCancelled) throw new Error("Translation stopped.");
       console.warn("Block translation had the wrong delimiter count; retrying with smaller batches.", error);
 
       if (blockTexts.length === 1) {
@@ -1552,8 +1575,9 @@ class TranslationProgressOverlay {
     const stopBtn = header.createEl("button", { cls: "codex-translator-overlay-stop" });
     stopBtn.setText("■ Stop");
     stopBtn.addEventListener("click", () => {
+      this.setStatus("Stopping...");
+      this.setDetail("Stopping running AI process. This prevents queued batches from starting and kills active local CLI processes.");
       this.onStop();
-      this.remove();
     });
 
     this.textEl = this.el.createDiv("codex-translator-overlay-text");
@@ -1576,6 +1600,11 @@ class TranslationProgressOverlay {
   setStatus(text: string) {
     this.statusText = text;
     this.refreshLabel();
+  }
+
+  setDetail(text: string) {
+    this.accumulated = "";
+    this.textEl.setText(text || "Waiting for response…");
   }
 
   setTokens(tokens: TokenUsage) {
@@ -2344,18 +2373,26 @@ function joinTranslatedBlocks(blocks: MarkdownBlock[], translations: string[]): 
     .trimEnd();
 }
 
-function buildBlockBatches(blocks: MarkdownBlock[], maxCharacters: number): MarkdownBlock[][] {
-  const batches: MarkdownBlock[][] = [];
+function buildBlockBatches(blocks: MarkdownBlock[], maxCharacters: number): MarkdownBlockBatch[] {
+  const batches: MarkdownBlockBatch[] = [];
   let currentBatch: MarkdownBlock[] = [];
   let currentSize = 0;
+  let startBlock = 0;
 
-  for (const block of blocks) {
+  for (let index = 0; index < blocks.length; index++) {
+    const block = blocks[index];
     const blockSize = block.text.length;
 
     if (currentBatch.length > 0 && currentSize + blockSize > maxCharacters) {
-      batches.push(currentBatch);
+      batches.push({
+        blocks: currentBatch,
+        charCount: currentSize,
+        endBlock: index,
+        startBlock
+      });
       currentBatch = [];
       currentSize = 0;
+      startBlock = index;
     }
 
     currentBatch.push(block);
@@ -2363,7 +2400,12 @@ function buildBlockBatches(blocks: MarkdownBlock[], maxCharacters: number): Mark
   }
 
   if (currentBatch.length > 0) {
-    batches.push(currentBatch);
+    batches.push({
+      blocks: currentBatch,
+      charCount: currentSize,
+      endBlock: blocks.length,
+      startBlock
+    });
   }
 
   return batches;
@@ -2673,6 +2715,23 @@ function formatTokenCount(value: number): string {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isStoppedError(error: unknown): boolean {
+  return getErrorMessage(error).toLowerCase().includes("translation stopped");
+}
+
+function formatCharacterCount(value: number): string {
+  return value >= 1000 ? `${(value / 1000).toFixed(1)}k` : String(value);
+}
+
+function previewBlockText(text: string): string {
+  const preview = normalizeWhitespace(text)
+    .replace(/^#+\s*/, "")
+    .slice(0, 180)
+    .trim();
+
+  return preview ? `Preview: ${preview}${preview.length >= 180 ? "..." : ""}` : "";
 }
 
 function formatExcerptEntry(
