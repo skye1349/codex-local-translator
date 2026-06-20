@@ -1,6 +1,6 @@
 {
   "name": "contextual-ai-reader",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "AI reading companion for translation, contextual vocabulary, PDFs, and Markdown notes.",
   "main": "main.js",
   "scripts": {

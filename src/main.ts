@@ -228,6 +228,7 @@ export default class ContextualAIReaderPlugin extends Plugin {
   private autoTimer?: number;
   private commandSelectionGestureUntil = 0;
   private currentKills = new Set<() => void>();
+  private overlayOperationRunning = false;
   private operationCancelled = false;
   private sessionTokens: TokenUsage = createEmptyTokenUsage();
   private onTokensUpdate?: (tokens: TokenUsage) => void;
@@ -612,6 +613,10 @@ export default class ContextualAIReaderPlugin extends Plugin {
       return;
     }
 
+    if (!this.beginOverlayOperation()) {
+      return;
+    }
+
     const backendLabel = this.getBackendLabel();
     const overlay = new TranslationProgressOverlay(
       this.app.workspace.containerEl,
@@ -651,6 +656,7 @@ export default class ContextualAIReaderPlugin extends Plugin {
       new Notice(isStoppedError(error) ? "Translation stopped. Running AI process was killed." : `Translation failed: ${getErrorMessage(error)}`);
       console.error("Translation failed", error);
     } finally {
+      this.finishOverlayOperation();
       this.setStatus("");
     }
   }
@@ -668,6 +674,10 @@ export default class ContextualAIReaderPlugin extends Plugin {
 
     if (!sourceText.trim()) {
       new Notice("Current Markdown file is empty.");
+      return;
+    }
+
+    if (!this.beginOverlayOperation()) {
       return;
     }
 
@@ -723,6 +733,7 @@ export default class ContextualAIReaderPlugin extends Plugin {
     } finally {
       window.clearInterval(timerInterval);
       overlay.remove();
+      this.finishOverlayOperation();
       this.setStatus("");
     }
   }
@@ -732,6 +743,10 @@ export default class ContextualAIReaderPlugin extends Plugin {
 
     if (files.length === 0) {
       new Notice("No Markdown files matched that batch scope.");
+      return;
+    }
+
+    if (!this.beginOverlayOperation()) {
       return;
     }
 
@@ -752,57 +767,61 @@ export default class ContextualAIReaderPlugin extends Plugin {
     let changedCount = 0;
     const failures: string[] = [];
 
-    for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
-      if (this.isCancelled) break;
-
-      const file = files[fileIndex];
-      const fileLabel = `${fileIndex + 1}/${files.length}`;
-
-      try {
-        overlay.setStatus(`File ${fileLabel}: ${file.name}`);
-        this.setStatus(`${backendLabel} batch translating ${fileIndex + 1}/${files.length}`);
-
-        const sourceText = await this.app.vault.read(file);
-
-        if (!sourceText.trim()) {
-          continue;
-        }
-
-        const translatedContent = await this.translateMarkdownDocument(sourceText, overlay, fileLabel);
-
-        if (!translatedContent.fullText.trim()) {
-          throw new Error(`${backendLabel} returned an empty translation.`);
-        }
-
-        const nextContent = mode === "append"
-          ? appendDocumentTranslation(sourceText, translatedContent.fullText)
-          : interleaveDocumentTranslation(sourceText, translatedContent.blocks, translatedContent.units, translatedContent.translations);
-
-        const currentContent = await this.app.vault.read(file);
-
-        if (currentContent !== sourceText) {
-          throw new Error("File changed while translating, skipped write.");
-        }
-
-        await this.app.vault.modify(file, nextContent);
-        changedCount++;
-      } catch (error) {
+    try {
+      for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
         if (this.isCancelled) break;
-        failures.push(`${file.path}: ${getErrorMessage(error)}`);
-        console.error("Batch file translation failed", file.path, error);
-      }
-    }
 
-    const stopped = this.isCancelled;
-    const summary = stopped
-      ? `Batch translation stopped: ${changedCount}/${files.length} files updated. Running AI process was killed.`
-      : failures.length === 0
-        ? `Batch translation complete: ${changedCount}/${files.length} files updated.`
-        : `Batch translation finished: ${changedCount}/${files.length} files updated, ${failures.length} failed.`;
-    new Notice(`${summary}${this.tokenUsageSuffix()}`, stopped || failures.length > 0 ? 12000 : 9000);
-    window.clearInterval(timerInterval);
-    overlay.remove();
-    this.setStatus("");
+        const file = files[fileIndex];
+        const fileLabel = `${fileIndex + 1}/${files.length}`;
+
+        try {
+          overlay.setStatus(`File ${fileLabel}: ${file.name}`);
+          this.setStatus(`${backendLabel} batch translating ${fileIndex + 1}/${files.length}`);
+
+          const sourceText = await this.app.vault.read(file);
+
+          if (!sourceText.trim()) {
+            continue;
+          }
+
+          const translatedContent = await this.translateMarkdownDocument(sourceText, overlay, fileLabel);
+
+          if (!translatedContent.fullText.trim()) {
+            throw new Error(`${backendLabel} returned an empty translation.`);
+          }
+
+          const nextContent = mode === "append"
+            ? appendDocumentTranslation(sourceText, translatedContent.fullText)
+            : interleaveDocumentTranslation(sourceText, translatedContent.blocks, translatedContent.units, translatedContent.translations);
+
+          const currentContent = await this.app.vault.read(file);
+
+          if (currentContent !== sourceText) {
+            throw new Error("File changed while translating, skipped write.");
+          }
+
+          await this.app.vault.modify(file, nextContent);
+          changedCount++;
+        } catch (error) {
+          if (this.isCancelled) break;
+          failures.push(`${file.path}: ${getErrorMessage(error)}`);
+          console.error("Batch file translation failed", file.path, error);
+        }
+      }
+
+      const stopped = this.isCancelled;
+      const summary = stopped
+        ? `Batch translation stopped: ${changedCount}/${files.length} files updated. Running AI process was killed.`
+        : failures.length === 0
+          ? `Batch translation complete: ${changedCount}/${files.length} files updated.`
+          : `Batch translation finished: ${changedCount}/${files.length} files updated, ${failures.length} failed.`;
+      new Notice(`${summary}${this.tokenUsageSuffix()}`, stopped || failures.length > 0 ? 12000 : 9000);
+    } finally {
+      window.clearInterval(timerInterval);
+      overlay.remove();
+      this.finishOverlayOperation();
+      this.setStatus("");
+    }
   }
 
   private resolveBatchFiles(scopeText: string): TFile[] {
@@ -1165,6 +1184,20 @@ export default class ContextualAIReaderPlugin extends Plugin {
   private tokenUsageSuffix(): string {
     const usage = this.getCurrentTokenUsage();
     return hasTokenUsage(usage) ? ` Token usage: ${formatTokenUsage(usage)}.` : "";
+  }
+
+  private beginOverlayOperation(): boolean {
+    if (this.overlayOperationRunning) {
+      new Notice("Another translation is already running. Stop it before starting a new one.");
+      return false;
+    }
+
+    this.overlayOperationRunning = true;
+    return true;
+  }
+
+  private finishOverlayOperation() {
+    this.overlayOperationRunning = false;
   }
 
   private get isCancelled() {
