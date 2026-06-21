@@ -1,0 +1,147 @@
+name: Pull Request
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and validate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Validate metadata
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require("fs");
+          const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const versions = JSON.parse(fs.readFileSync("versions.json", "utf8"));
+
+          if (manifest.id !== "contextual-ai-reader") {
+            throw new Error(`Unexpected manifest id: ${manifest.id}`);
+          }
+          if (manifest.author !== "Taoye") {
+            throw new Error(`Unexpected author: ${manifest.author}`);
+          }
+          if (manifest.version !== pkg.version) {
+            throw new Error(`manifest.json version ${manifest.version} does not match package.json version ${pkg.version}`);
+          }
+          if (!versions[manifest.version]) {
+            throw new Error(`versions.json is missing ${manifest.version}`);
+          }
+          if (!fs.existsSync("main.js") || !fs.existsSync("styles.css")) {
+            throw new Error("Built plugin assets are missing.");
+          }
+          NODE
+
+      - name: Ensure built assets are committed
+        shell: bash
+        run: git diff --exit-code -- main.js manifest.json styles.css package-lock.json package.json versions.json
+
+      - name: Scan for blocked release content
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require("fs");
+          const files = [
+            "src/main.ts",
+            "main.js",
+            "README.md",
+            "README.zh-CN.md",
+            "README.ja.md",
+            "README.ko.md",
+            "README.es.md",
+            "README.fr.md",
+            "README.de.md",
+            "manifest.json",
+            "package.json",
+            "versions.json"
+          ].filter((file) => fs.existsSync(file));
+
+          const patterns = [
+            [/AIza[0-9A-Za-z_-]{20,}/, "Google API key"],
+            [/sk-[A-Za-z0-9_-]{20,}/, "OpenAI-style API key"],
+            [/sk-ant-[A-Za-z0-9_-]+/, "Anthropic-style API key"],
+            [/YouTube|youtube/, "YouTube feature residue"],
+            [/Translate selection to Chinese|Append Chinese|append Chinese|interleave Chinese|Chinese below|Speak selected English|getSingleEnglishWord/, "old English-to-Chinese wording"]
+          ];
+
+          const failures = [];
+          for (const file of files) {
+            const text = fs.readFileSync(file, "utf8");
+            for (const [pattern, label] of patterns) {
+              if (pattern.test(text)) {
+                failures.push(`${file}: ${label}`);
+              }
+            }
+          }
+
+          if (failures.length) {
+            throw new Error(`Blocked release content found:\n${failures.join("\n")}`);
+          }
+          NODE
+
+  package:
+    name: Package PR plugin artifact
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Create installable plugin package
+        run: |
+          mkdir -p dist/contextual-ai-reader
+          cp manifest.json main.js styles.css dist/contextual-ai-reader/
+          cd dist
+          zip -r contextual-ai-reader-pr-${GITHUB_SHA}.zip contextual-ai-reader
+
+      - name: Upload installable plugin package
+        uses: actions/upload-artifact@v4
+        with:
+          name: contextual-ai-reader-pr-${{ github.sha }}
+          path: dist/contextual-ai-reader-pr-${{ github.sha }}.zip
+          if-no-files-found: error
