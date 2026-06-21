@@ -618,7 +618,8 @@ export default class ContextualAIReaderPlugin extends Plugin {
     baseDefinition?: string
   ) {
     const backendLabel = this.getBackendLabel();
-    this.updateVocabularyStatus(`${backendLabel} 正在结合上下文解释…`);
+    const uiText = getVocabularyUiText(this.settings.targetLanguage, backendLabel);
+    this.updateVocabularyStatus(uiText.loadingContext);
     this.startOperation();
 
     try {
@@ -1695,23 +1696,25 @@ export default class ContextualAIReaderPlugin extends Plugin {
     wordEl.setText(card.word);
 
     const localEl = body.createDiv("contextual-ai-reader-vocab-section");
-    localEl.createDiv("contextual-ai-reader-vocab-label").setText("基础释义");
+    const uiText = getVocabularyUiText(this.settings.targetLanguage, this.getBackendLabel());
+
+    localEl.createDiv("contextual-ai-reader-vocab-label").setText(uiText.baseDefinitionLabel);
     localEl.createDiv("contextual-ai-reader-vocab-text").setText(
-      card.baseDefinition || "本地词典和缓存暂无命中。"
+      card.baseDefinition || uiText.noLocalDefinition
     );
 
     const contextEl = body.createDiv("contextual-ai-reader-vocab-section");
-    contextEl.createDiv("contextual-ai-reader-vocab-label").setText("当前语境");
+    contextEl.createDiv("contextual-ai-reader-vocab-label").setText(uiText.contextLabel);
     contextEl.createDiv("contextual-ai-reader-vocab-text").setText(
       card.contextExplanation ||
       (card.status === "loading"
-        ? `${this.getBackendLabel()} 正在结合当前段落解释…`
-        : card.errorText || "点击 AI 按钮生成这个词在当前段落里的意思。")
+        ? uiText.loadingParagraph
+        : card.errorText || uiText.clickAiHint)
     );
 
     if (card.status === "loading") {
       const status = body.createDiv("contextual-ai-reader-vocab-status");
-      status.setText(`${this.getBackendLabel()} 正在结合上下文解释…`);
+      status.setText(uiText.loadingContext);
     }
 
     if (card.tokenUsage && hasTokenUsage(card.tokenUsage)) {
@@ -1743,11 +1746,11 @@ export default class ContextualAIReaderPlugin extends Plugin {
     actions.appendChild(aiButton);
 
     actions.appendChild(this.createIconButton("book-plus", "Save word to excerpts", () => {
-      void this.saveExcerpt(sourceText, formatVocabularyCard(card, context));
+      void this.saveExcerpt(sourceText, formatVocabularyCard(card, context, this.settings.targetLanguage));
     }));
 
     actions.appendChild(this.createIconButton("copy", "Copy vocabulary note", () => {
-      void navigator.clipboard.writeText(formatVocabularyCard(card, context));
+      void navigator.clipboard.writeText(formatVocabularyCard(card, context, this.settings.targetLanguage));
       new Notice("Vocabulary note copied.");
     }));
 
@@ -2252,8 +2255,8 @@ class ContextualAIReaderSettingTab extends PluginSettingTab {
       .setName("Custom prompt / context")
       .setDesc("Add translation background or preferences, for example the book or domain you are reading.")
       .addTextArea((text) => {
-        text
-          .setPlaceholder("我正在阅读《穷查理宝典》。请结合投资、商业、心理学和芒格语境翻译，保持中文自然准确。")
+          text
+            .setPlaceholder("I am reading a finance or psychology book. Keep key terms consistent and explain vocabulary in my target language.")
           .setValue(this.plugin.settings.customPrompt)
           .onChange(async (value) => {
             this.plugin.settings.customPrompt = value.trim();
@@ -2573,17 +2576,153 @@ function getVocabularyLookupCandidates(word: string): string[] {
   return Array.from(candidates);
 }
 
-function formatVocabularyCard(card: VocabularyCard, context: VocabularyContext): string {
+interface VocabularyUiText {
+  baseDefinitionLabel: string;
+  clickAiHint: string;
+  contextHeading: string;
+  contextLabel: string;
+  loadingContext: string;
+  loadingParagraph: string;
+  noLocalDefinition: string;
+}
+
+function getVocabularyUiText(targetLanguage: string, backendLabel: string): VocabularyUiText {
+  const textByLanguage: Record<string, Omit<VocabularyUiText, "loadingContext" | "loadingParagraph">> = {
+    "zh-CN": {
+      baseDefinitionLabel: "基础释义",
+      clickAiHint: "点击 AI 按钮生成这个词在当前段落里的意思。",
+      contextHeading: "当前语境解释",
+      contextLabel: "当前语境",
+      noLocalDefinition: "本地词典和缓存暂无命中。"
+    },
+    "zh-TW": {
+      baseDefinitionLabel: "基礎釋義",
+      clickAiHint: "點擊 AI 按鈕生成這個詞在目前段落裡的意思。",
+      contextHeading: "目前語境解釋",
+      contextLabel: "目前語境",
+      noLocalDefinition: "本地詞典和快取暫無命中。"
+    },
+    ja: {
+      baseDefinitionLabel: "基本の意味",
+      clickAiHint: "AI ボタンを押すと、この語が現在の段落でどう使われているかを説明します。",
+      contextHeading: "現在の文脈での説明",
+      contextLabel: "現在の文脈",
+      noLocalDefinition: "ローカル辞書とキャッシュには該当する項目がありません。"
+    },
+    ko: {
+      baseDefinitionLabel: "기본 의미",
+      clickAiHint: "AI 버튼을 누르면 이 단어가 현재 문단에서 어떤 의미인지 설명합니다.",
+      contextHeading: "현재 문맥 설명",
+      contextLabel: "현재 문맥",
+      noLocalDefinition: "로컬 사전과 캐시에 일치하는 항목이 없습니다."
+    },
+    es: {
+      baseDefinitionLabel: "Significado básico",
+      clickAiHint: "Haz clic en el botón de IA para explicar este término en el párrafo actual.",
+      contextHeading: "Explicación en contexto",
+      contextLabel: "Contexto actual",
+      noLocalDefinition: "No hay coincidencias en el diccionario local ni en la caché."
+    },
+    fr: {
+      baseDefinitionLabel: "Sens de base",
+      clickAiHint: "Cliquez sur le bouton IA pour expliquer ce terme dans le paragraphe actuel.",
+      contextHeading: "Explication en contexte",
+      contextLabel: "Contexte actuel",
+      noLocalDefinition: "Aucune entrée trouvée dans le dictionnaire local ni le cache."
+    },
+    de: {
+      baseDefinitionLabel: "Grundbedeutung",
+      clickAiHint: "Klicke auf die KI-Schaltfläche, um diesen Begriff im aktuellen Absatz zu erklären.",
+      contextHeading: "Erklärung im Kontext",
+      contextLabel: "Aktueller Kontext",
+      noLocalDefinition: "Kein Treffer im lokalen Wörterbuch oder Cache."
+    },
+    en: {
+      baseDefinitionLabel: "Basic meaning",
+      clickAiHint: "Click the AI button to explain this term in the current paragraph.",
+      contextHeading: "Context explanation",
+      contextLabel: "Current context",
+      noLocalDefinition: "No local dictionary or cache match."
+    }
+  };
+
+  const baseText = textByLanguage[targetLanguage] ?? textByLanguage.en;
+
+  if (targetLanguage === "zh-CN") {
+    return {
+      ...baseText,
+      loadingContext: `${backendLabel} 正在结合上下文解释…`,
+      loadingParagraph: `${backendLabel} 正在结合当前段落解释…`
+    };
+  }
+
+  if (targetLanguage === "zh-TW") {
+    return {
+      ...baseText,
+      loadingContext: `${backendLabel} 正在結合上下文解釋…`,
+      loadingParagraph: `${backendLabel} 正在結合目前段落解釋…`
+    };
+  }
+
+  if (targetLanguage === "ja") {
+    return {
+      ...baseText,
+      loadingContext: `${backendLabel} が文脈に基づいて説明しています…`,
+      loadingParagraph: `${backendLabel} が現在の段落に基づいて説明しています…`
+    };
+  }
+
+  if (targetLanguage === "ko") {
+    return {
+      ...baseText,
+      loadingContext: `${backendLabel}가 문맥을 바탕으로 설명하는 중…`,
+      loadingParagraph: `${backendLabel}가 현재 문단을 바탕으로 설명하는 중…`
+    };
+  }
+
+  if (targetLanguage === "es") {
+    return {
+      ...baseText,
+      loadingContext: `${backendLabel} está explicando con contexto…`,
+      loadingParagraph: `${backendLabel} está explicando con el párrafo actual…`
+    };
+  }
+
+  if (targetLanguage === "fr") {
+    return {
+      ...baseText,
+      loadingContext: `${backendLabel} explique avec le contexte…`,
+      loadingParagraph: `${backendLabel} explique avec le paragraphe actuel…`
+    };
+  }
+
+  if (targetLanguage === "de") {
+    return {
+      ...baseText,
+      loadingContext: `${backendLabel} erklärt mit Kontext…`,
+      loadingParagraph: `${backendLabel} erklärt anhand des aktuellen Absatzes…`
+    };
+  }
+
+  return {
+    ...baseText,
+    loadingContext: `${backendLabel} is explaining with context…`,
+    loadingParagraph: `${backendLabel} is explaining with the current paragraph…`
+  };
+}
+
+function formatVocabularyCard(card: VocabularyCard, context: VocabularyContext, targetLanguage: string): string {
+  const uiText = getVocabularyUiText(targetLanguage, "AI");
   const lines = [
     `**${card.word}**`,
     "",
-    `- 基础释义：${card.baseDefinition || "本地词典和缓存暂无命中。"}`
+    `- ${uiText.baseDefinitionLabel}: ${card.baseDefinition || uiText.noLocalDefinition}`
   ];
 
   if (card.contextExplanation) {
-    lines.push("", "### 当前语境解释", card.contextExplanation);
+    lines.push("", `### ${uiText.contextHeading}`, card.contextExplanation);
   } else if (card.errorText) {
-    lines.push("", `### 当前语境解释`, card.errorText);
+    lines.push("", `### ${uiText.contextHeading}`, card.errorText);
   }
 
   if (context.filePath) {
