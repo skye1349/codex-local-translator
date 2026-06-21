@@ -49,4 +49,31 @@ describe("Contextual AI Reader in Obsidian", function () {
     await mkdir("e2e-artifacts", { recursive: true });
     await browser.saveScreenshot("e2e-artifacts/contextual-ai-reader-settings.png");
   });
+
+  it("reuses an already-open excerpt note instead of opening duplicate leaves", async function () {
+    const result = await browser.executeObsidian(async ({ app }) => {
+      const plugin = app.plugins.plugins["contextual-ai-reader"];
+      const path = "Contextual AI Reader Excerpts.md";
+      let file = app.vault.getAbstractFileByPath(path);
+
+      if (!file) {
+        file = await app.vault.create(path, "# Contextual AI Reader Excerpts\n\n");
+      }
+
+      await plugin.openExcerptFile(file);
+      const afterFirstOpen = app.workspace
+        .getLeavesOfType("markdown")
+        .filter((leaf) => leaf.view.file?.path === path).length;
+
+      await plugin.openExcerptFile(file);
+      const afterSecondOpen = app.workspace
+        .getLeavesOfType("markdown")
+        .filter((leaf) => leaf.view.file?.path === path).length;
+
+      return { afterFirstOpen, afterSecondOpen };
+    });
+
+    expect(result.afterFirstOpen).toBe(1);
+    expect(result.afterSecondOpen).toBe(1);
+  });
 });

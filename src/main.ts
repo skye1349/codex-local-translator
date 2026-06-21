@@ -1524,8 +1524,20 @@ export default class ContextualAIReaderPlugin extends Plugin {
   }
 
   private async openExcerptFile(file: TFile) {
+    const existingLeaf = this.findOpenFileLeaf(file);
+
+    if (existingLeaf) {
+      return;
+    }
+
     const leaf = this.app.workspace.getLeaf("split", "vertical");
     await leaf.openFile(file, { active: false });
+  }
+
+  private findOpenFileLeaf(file: TFile) {
+    return this.app.workspace
+      .getLeavesOfType("markdown")
+      .find((leaf) => leaf.view instanceof MarkdownView && leaf.view.file?.path === file.path);
   }
 
   private async getAvailableVaultPath(path: string): Promise<string> {
