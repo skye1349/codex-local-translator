@@ -1,6 +1,6 @@
 # Contextual AI Reader
 
-[中文文档](README.zh-CN.md)
+[中文文档](https://github.com/skye1349/contextual-ai-reader/blob/main/README.zh-CN.md)
 
 Contextual AI Reader is a desktop reading companion for English material with AI-assisted Chinese translation, vocabulary explanation, text-to-speech, excerpts, and Markdown file translation.
 
